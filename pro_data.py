@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -384,11 +383,19 @@ def load_team_map_data(
             row["played"] += 1
             row["wins" if team_won else "losses"] += 1
             row["rounds_won"] += int(
-                game.get("winner_clan_score") if team_won else game.get("loser_clan_score")
+                (
+                    game.get("winner_clan_score")
+                    if team_won
+                    else game.get("loser_clan_score")
+                )
                 or 0
             )
             row["rounds_lost"] += int(
-                game.get("loser_clan_score") if team_won else game.get("winner_clan_score")
+                (
+                    game.get("loser_clan_score")
+                    if team_won
+                    else game.get("winner_clan_score")
+                )
                 or 0
             )
             if team_won:
