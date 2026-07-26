@@ -8,6 +8,8 @@ import streamlit as st
 from vrs_data import (
     VRSDataError,
     fallback_data,
+    load_hltv_live_standings,
+    load_hltv_team_detail,
     load_latest_standings,
     load_team_detail,
     simulate_roster,
@@ -121,12 +123,22 @@ st.markdown(
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_standings():
+    return load_hltv_live_standings()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_official_standings():
     return load_latest_standings()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_detail(url: str):
+def get_official_detail(url: str):
     return load_team_detail(url)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_live_detail(team_row: dict, official_detail: dict | None):
+    return load_hltv_team_detail(team_row, official_detail)
 
 
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
@@ -134,15 +146,19 @@ using_fallback = False
 try:
     snapshot, standings = get_standings()
 except VRSDataError:
-    snapshot, standings = fallback_snapshot, fallback_standings
-    using_fallback = True
+    try:
+        snapshot, standings = get_official_standings()
+        snapshot["source"] = "Valve official snapshot"
+    except VRSDataError:
+        snapshot, standings = fallback_snapshot, fallback_standings
+        using_fallback = True
 
 
 st.markdown(
     f"""
     <div class="vrs-nav">
       <div class="brand"><div class="brand-mark"></div><div class="brand-name">VRS Roster Lab</div></div>
-      <div class="source-note">Valve VRS · Event data by HLTV · {snapshot['date'].replace('_', '-')}</div>
+      <div class="source-note">{html.escape(snapshot.get('source', 'Valve official snapshot'))} · {snapshot['date'].replace('_', '-')}</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -154,18 +170,36 @@ selected_name = st.selectbox(
     "Select a ranked team",
     team_names,
     index=default_index,
-    help="Teams from Valve's latest published global standings snapshot.",
+    help="Teams from HLTV's current live VRS calculation.",
 )
 selected = next(row for row in standings if row["team"] == selected_name)
 
 try:
-    detail = fallback_detail if using_fallback or not selected["detail_url"] else get_detail(selected["detail_url"])
+    if selected.get("source") == "HLTV Live VRS (Beta)":
+        official_detail = None
+        try:
+            _, official_rows = get_official_standings()
+            official_row = next(
+                (row for row in official_rows if row["team"].casefold() == selected_name.casefold()),
+                None,
+            )
+            if official_row and official_row["detail_url"]:
+                official_detail = get_official_detail(official_row["detail_url"])
+        except VRSDataError:
+            pass
+        detail = get_live_detail(selected, official_detail)
+    else:
+        detail = (
+            fallback_detail
+            if using_fallback or not selected["detail_url"]
+            else get_official_detail(selected["detail_url"])
+        )
 except VRSDataError:
     detail = fallback_detail
     using_fallback = True
 
 if using_fallback:
-    st.warning("Live Valve data is temporarily unavailable. Showing the bundled FaZe demo snapshot.")
+    st.warning("Live HLTV and official Valve data are temporarily unavailable. Showing the bundled FaZe demo.")
 
 analysis_tab, rankings_tab, method_tab = st.tabs(["TEAM ANALYSIS", "GLOBAL RANKINGS", "METHODOLOGY"])
 
@@ -221,7 +255,7 @@ with analysis_tab:
         st.markdown(
             f"""
             <div class="team-hero">
-              <div class="eyebrow">Current official roster</div>
+              <div class="eyebrow">Current live VRS roster</div>
               <div class="team-line">
                 <div class="team-badge">{html.escape(initials)}</div>
                 <div>
@@ -241,9 +275,39 @@ with analysis_tab:
             unsafe_allow_html=True,
         )
 
-        st.subheader("Match influence and roster eligibility")
+        if simulation["event_groups"]:
+            st.subheader("VRS points by event")
+            st.caption(
+                "Points shown are the sum of HLTV's listed LAN, opponent-network, bounty and "
+                "head-to-head rows. The 400-point base is not assigned to an event."
+            )
+            events = pd.DataFrame(simulation["event_groups"])
+            event_display = events[
+                ["event", "current_points", "retained_points", "lost_points", "status"]
+            ].rename(
+                columns={
+                    "event": "Event",
+                    "current_points": "Current points",
+                    "retained_points": "Retained",
+                    "lost_points": "Lost",
+                    "status": "Status",
+                }
+            )
+            st.dataframe(
+                event_display,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Current points": st.column_config.NumberColumn(format="%.0f"),
+                    "Retained": st.column_config.NumberColumn(format="%.0f"),
+                    "Lost": st.column_config.NumberColumn(format="%.0f"),
+                },
+            )
+
+        st.subheader("Live match influence and roster eligibility")
         st.caption(
-            "Valve groups historical results into the same ranked entity when at least three players overlap. "
+            "HLTV's live VRS detail includes matches from the current day. Valve groups historical "
+            "results into the same ranked entity when at least three players overlap. "
             "Rows marked “At risk” sit exactly on that threshold."
         )
         match_rows = pd.DataFrame(simulation["rows"])
@@ -256,11 +320,12 @@ with analysis_tab:
                 + match_rows["lan_adjusted"]
             ).map(lambda value: f"{value:.3f}")
             display = match_rows[
-                ["date", "opponent", "result", "Core", "overlap", "H2H", "Factor support", "status"]
+                ["date", "opponent", "event", "result", "Core", "overlap", "H2H", "status"]
             ].rename(
                 columns={
                     "date": "Date",
                     "opponent": "Opponent",
+                    "event": "Event",
                     "result": "W/L",
                     "overlap": "Core overlap",
                     "status": "Status",
@@ -322,6 +387,7 @@ with analysis_tab:
 
 with rankings_tab:
     st.subheader(f"Global standings · {snapshot['date'].replace('_', '-')}")
+    st.caption(snapshot.get("source", "Valve official snapshot"))
     rankings_df = pd.DataFrame(
         {
             "Rank": [row["rank"] for row in standings],
@@ -346,23 +412,26 @@ with method_tab:
     st.markdown(
         """
         **Official score.** The headline score, factors and contributing matches come directly from
-        Valve's published Regional Standings detail files. Valve's event data is supplied by HLTV.
+        **HLTV's live VRS Beta**, which updates between Valve's official monthly snapshots and includes
+        secured prize money from unfinished events.
 
-        **Roster identity.** Valve's public model treats a past lineup as the same ranked entity when
+        **Official reference.** Valve's public Regional Standings repository remains the fallback and
+        is used to enrich older matches with their historical five-player lineups.
+
+        **Roster identity.** Valve's model treats a past lineup as the same ranked entity when
         it shares at least **three players** with the newer lineup. The simulator applies that rule to
-        every listed historical match.
+        the listed historical contributions.
 
-        **Indicative score.** VRS is not a set of fixed points awarded per event. The starting value is
-        normalized against every other roster and uses top-ten results, age weighting, event weighting,
-        prize money and opponent-network factors. The simulated score therefore estimates retained
-        support; it is deliberately not labelled as an exact future ranking.
-
-        **Next data layer.** Mapping Valve match IDs and prize dates back to HLTV event names will allow
-        the same eligibility view to be grouped by event. That enrichment should be cached in the app
-        rather than scraping HLTV on every page load.
+        **Indicative score.** The live point rows allow a much closer inheritance estimate, grouped by
+        event. It is still not an official reranking: changing a roster also changes the global opponent
+        network, top-ten selection and head-to-head recalculation.
         """
     )
-    st.link_button(
-        "Open Valve's official VRS repository",
-        "https://github.com/ValveSoftware/counter-strike_regional_standings",
-    )
+    link_left, link_right = st.columns(2)
+    with link_left:
+        st.link_button("Open HLTV's live VRS", "https://www.hltv.org/valve-ranking/teams")
+    with link_right:
+        st.link_button(
+            "Open Valve's official VRS repository",
+            "https://github.com/ValveSoftware/counter-strike_regional_standings",
+        )
