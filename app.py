@@ -263,6 +263,42 @@ with analysis_tab:
             """,
             unsafe_allow_html=True,
         )
+        with st.expander(
+            "Why can the score increase?",
+            expanded=delta is not None and delta > 0,
+        ):
+            st.markdown(
+                """
+                A roster change does **not** award new VRS points. The estimate removes historical
+                results that no longer share at least three players with the simulated roster.
+                If the removed history contains negative head-to-head adjustments, losing those
+                penalties can outweigh positive points that are lost at the same time.
+                """
+            )
+            breakdown = pd.DataFrame(simulation["component_breakdown"])
+            if not breakdown.empty:
+                breakdown_display = breakdown.rename(
+                    columns={
+                        "component": "Component",
+                        "current": "Current",
+                        "simulated": "Simulated",
+                        "change": "Change",
+                    }
+                )
+                st.dataframe(
+                    breakdown_display,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Current": st.column_config.NumberColumn(format="%.0f"),
+                        "Simulated": st.column_config.NumberColumn(format="%.0f"),
+                        "Change": st.column_config.NumberColumn(format="%+.0f"),
+                    },
+                )
+            st.caption(
+                "This is an inheritance explanation, not a guaranteed official gain. Valve "
+                "recalculates the full global opponent and head-to-head network."
+            )
 
     with left:
         initials = "".join(part[0] for part in detail["team"].split()[:2]).upper()
