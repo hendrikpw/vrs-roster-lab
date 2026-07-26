@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -8,11 +9,15 @@ import streamlit as st
 from vrs_data import (
     DATA_MODEL_VERSION,
     VRSDataError,
+    build_vrs_timeline,
     fallback_data,
+    load_hltv_invite_ranking,
+    load_hltv_invites,
     load_hltv_live_standings,
     load_hltv_team_detail,
     load_latest_standings,
     load_team_detail,
+    project_vrs,
     simulate_roster,
 )
 
@@ -148,6 +153,16 @@ def get_live_detail(
     return load_hltv_team_detail(team_row, official_detail)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_invites(data_model_version: str):
+    return load_hltv_invites()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_invite_ranking(event: dict, data_model_version: str):
+    return load_hltv_invite_ranking(event)
+
+
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
 using_fallback = False
 try:
@@ -208,7 +223,15 @@ except VRSDataError:
 if using_fallback:
     st.warning("Live HLTV and official Valve data are temporarily unavailable. Showing the bundled FaZe demo.")
 
-analysis_tab, rankings_tab, method_tab = st.tabs(["TEAM ANALYSIS", "GLOBAL RANKINGS", "METHODOLOGY"])
+analysis_tab, timeline_tab, invite_tab, rankings_tab, method_tab = st.tabs(
+    [
+        "TEAM ANALYSIS",
+        "VRS TIMELINE",
+        "INVITE RACE",
+        "GLOBAL RANKINGS",
+        "METHODOLOGY",
+    ]
+)
 
 with analysis_tab:
     left, right = st.columns([2.1, 0.9], gap="large")
@@ -474,6 +497,272 @@ with analysis_tab:
                     "HLTV event-name enrichment is the next data layer."
                 )
 
+with timeline_tab:
+    st.subheader(f"VRS timeline · {detail['team']}")
+    st.caption(
+        "Project the currently listed VRS contributions forward with no new results, "
+        "then compare that baseline with a simulated roster."
+    )
+    if not detail.get("contributions"):
+        st.info(
+            "Timeline projections require HLTV's live contribution rows and are unavailable "
+            "while the app is using an official or bundled fallback snapshot."
+        )
+    else:
+        snapshot_day = datetime.strptime(
+            detail["snapshot_date"].replace("_", "-"), "%Y-%m-%d"
+        ).date()
+        controls, summary = st.columns([0.9, 1.6], gap="large")
+        with controls:
+            target_date = st.date_input(
+                "Projection date",
+                value=snapshot_day + timedelta(days=30),
+                min_value=snapshot_day,
+                max_value=snapshot_day + timedelta(days=183),
+                help="The model can project until all currently listed results have aged out.",
+            )
+            timeline_leaving = st.multiselect(
+                "Players leaving",
+                detail["roster"],
+                key="timeline_players_leaving",
+            )
+            timeline_replacements_text = st.text_input(
+                "Replacement players",
+                placeholder="e.g. siuhy, lauNX",
+                key="timeline_replacements",
+            )
+            timeline_replacements = [
+                name.strip()
+                for name in timeline_replacements_text.split(",")
+                if name.strip()
+            ]
+            projection = project_vrs(
+                detail,
+                target_date,
+                timeline_leaving,
+                timeline_replacements,
+            )
+        with summary:
+            metric_columns = st.columns(4)
+            metric_columns[0].metric("Current VRS", f"{detail['final_score']:,.0f}")
+            metric_columns[1].metric(
+                "No-new-results baseline",
+                f"{projection['baseline_score']:,.0f}",
+                f"{projection['decay_delta']:+,.0f}",
+            )
+            metric_columns[2].metric(
+                "Simulated roster",
+                (
+                    f"{projection['projected_score']:,.0f}"
+                    if projection["projected_score"] is not None
+                    else "N/A"
+                ),
+            )
+            metric_columns[3].metric(
+                "Roster-only impact",
+                (
+                    f"{projection['roster_delta']:+,.0f}"
+                    if projection["roster_delta"] is not None
+                    else "N/A"
+                ),
+            )
+            if not projection["projection_complete"]:
+                st.warning(
+                    f"{projection['unknown_rows']} historical contribution rows have no verified "
+                    "lineup, so the changed-roster projection is intentionally withheld."
+                )
+
+        timeline = build_vrs_timeline(
+            detail,
+            timeline_leaving,
+            timeline_replacements,
+        )
+        chart_rows = pd.DataFrame(timeline["rows"])
+        chart_rows["Date"] = pd.to_datetime(chart_rows["date"])
+        chart_rows = chart_rows.set_index("Date")[
+            ["baseline_score", "projected_score"]
+        ].rename(
+            columns={
+                "baseline_score": "Same roster",
+                "projected_score": "Simulated roster",
+            }
+        )
+        st.line_chart(chart_rows, color=["#6d685e", "#e23a32"])
+
+        best_window = timeline["best_window"]
+        if (timeline_leaving or timeline_replacements) and best_window:
+            st.markdown(
+                f"**Least damaging modeled change window:** "
+                f"{best_window['date']} · roster-only impact "
+                f"{best_window['roster_delta']:+,.0f} points."
+            )
+
+        event_rows = pd.DataFrame(projection["event_groups"])
+        if not event_rows.empty:
+            event_display = event_rows[
+                [
+                    "event",
+                    "current_points",
+                    "baseline_points",
+                    "simulated_points",
+                    "roster_delta",
+                    "status",
+                ]
+            ].rename(
+                columns={
+                    "event": "Event",
+                    "current_points": "Current",
+                    "baseline_points": "At target date",
+                    "simulated_points": "With roster",
+                    "roster_delta": "Roster impact",
+                    "status": "Status",
+                }
+            )
+            st.dataframe(
+                event_display,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Current": st.column_config.NumberColumn(format="%.0f"),
+                    "At target date": st.column_config.NumberColumn(format="%.0f"),
+                    "With roster": st.column_config.NumberColumn(format="%.0f"),
+                    "Roster impact": st.column_config.NumberColumn(format="%+.0f"),
+                },
+            )
+        st.markdown(
+            """
+            <div class="disclaimer">
+              Timeline assumption: the team plays no new matches. Existing results keep full
+              recency weight for 30 days and then decay linearly to zero by day 183. This is an
+              explanatory projection, not an official future score: Valve will recalculate the
+              global opponent network, top-ten selections, bounties and head-to-head values.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+with invite_tab:
+    st.subheader("Tournament invite race")
+    st.caption(
+        "Explore HLTV's predicted VRS ranking at upcoming tournament invite dates. "
+        "The qualification line is event- and region-specific."
+    )
+    try:
+        invite_events = get_invites(DATA_MODEL_VERSION)
+    except VRSDataError as exc:
+        invite_events = []
+        st.warning(f"HLTV's invite calendar is temporarily unavailable: {exc}")
+
+    if invite_events:
+        chosen_event = st.selectbox(
+            "Upcoming event",
+            invite_events,
+            format_func=lambda event: (
+                f"{event['name']} · invite date {event['invite_date']}"
+            ),
+        )
+        try:
+            invite_ranking = get_invite_ranking(chosen_event, DATA_MODEL_VERSION)
+        except VRSDataError as exc:
+            invite_ranking = None
+            st.warning(f"This invite prediction is temporarily unavailable: {exc}")
+
+        if invite_ranking:
+            available_tracks = list(invite_ranking["tracks"])
+            selected_track = st.selectbox(
+                "Invite track",
+                available_tracks,
+                index=(
+                    available_tracks.index("Global")
+                    if "Global" in available_tracks
+                    else 0
+                ),
+                help="Some tournaments allocate separate Global, Europe, Americas or Asia slots.",
+            )
+            track_data = invite_ranking["tracks"][selected_track]
+            track_rows = track_data["rows"]
+            cutoff = track_data["cutoff"]
+            first_out = track_data["first_out"]
+            selected_invite_team = next(
+                (
+                    row
+                    for row in track_rows
+                    if row["team"].casefold() == selected_name.casefold()
+                ),
+                None,
+            )
+
+            invite_metrics = st.columns(4)
+            invite_metrics[0].metric("Invite date", invite_ranking["ranking_date"])
+            invite_metrics[1].metric(
+                f"{selected_track} slots",
+                sum(row["qualified"] for row in track_rows),
+            )
+            invite_metrics[2].metric(
+                f"{selected_name} position",
+                (
+                    f"#{selected_invite_team['rank']}"
+                    if selected_invite_team
+                    else "Not listed"
+                ),
+            )
+            team_status = selected_invite_team["status"] if selected_invite_team else "Not listed"
+            invite_metrics[3].metric(f"{selected_name} status", team_status)
+
+            if selected_invite_team and cutoff:
+                if selected_invite_team["qualified"]:
+                    comparison = first_out["points"] if first_out else cutoff["points"]
+                    st.success(
+                        f"{selected_name} is currently inside the predicted invite line with a "
+                        f"{selected_invite_team['points'] - comparison:+,} point cushion."
+                    )
+                else:
+                    points_needed = max(
+                        0, cutoff["points"] - selected_invite_team["points"] + 1
+                    )
+                    st.warning(
+                        f"{selected_name} is outside the predicted invite line and needs roughly "
+                        f"{points_needed:,} more points than the current cutoff."
+                    )
+
+            cutoff_points = cutoff["points"] if cutoff else None
+            race_table = pd.DataFrame(
+                {
+                    "Rank": [row["rank"] for row in track_rows],
+                    "Team": [row["team"] for row in track_rows],
+                    "Points": [row["points"] for row in track_rows],
+                    "Status": [row["status"] for row in track_rows],
+                    "Gap to cutoff": [
+                        row["points"] - cutoff_points if cutoff_points is not None else None
+                        for row in track_rows
+                    ],
+                    "Roster": [" · ".join(row["roster"]) for row in track_rows],
+                }
+            )
+            st.dataframe(
+                race_table,
+                width="stretch",
+                hide_index=True,
+                height=620,
+                column_config={
+                    "Rank": st.column_config.NumberColumn(format="#%d"),
+                    "Points": st.column_config.NumberColumn(format="%d"),
+                    "Gap to cutoff": st.column_config.NumberColumn(format="%+d"),
+                },
+            )
+            st.link_button("Open this prediction on HLTV", chosen_event["event_url"])
+            st.markdown(
+                """
+                <div class="disclaimer">
+                  HLTV labels this as a prediction of the ranking on the invite date. It looks
+                  six months back, applies time decay and may include secured winnings from
+                  unfinished events. The official invite position can still change with every
+                  result and with Valve's full network recalculation.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
 with rankings_tab:
     st.subheader(f"Global standings · {snapshot['date'].replace('_', '-')}")
     st.caption(snapshot.get("source", "Valve official snapshot"))
@@ -516,14 +805,26 @@ with method_tab:
         event. It is still not an official reranking: changing a roster also changes the global opponent
         network, top-ten selection and head-to-head recalculation.
 
+        **Timeline.** The no-new-results curve keeps a contribution at full recency weight for 30 days
+        and then decays it linearly to zero by day 183. It isolates timing and roster inheritance, but
+        cannot predict new results or Valve's future global network.
+
+        **Invite race.** Upcoming event dates, predicted rankings and qualification lines come from
+        HLTV's VRS invite pages. These are forecasts for the invite date, not confirmed invitations.
+
         **Missing lineup safety.** A historical result is never assigned the current roster by default.
         If neither source can verify its lineup, it is marked **Unknown** and no simulated score is shown
         until the missing history can be resolved.
         """
     )
-    link_left, link_right = st.columns(2)
+    link_left, link_middle, link_right = st.columns(3)
     with link_left:
         st.link_button("Open HLTV's live VRS", "https://www.hltv.org/valve-ranking/teams")
+    with link_middle:
+        st.link_button(
+            "Open HLTV's invite predictions",
+            "https://www.hltv.org/valve-ranking/invites",
+        )
     with link_right:
         st.link_button(
             "Open Valve's official VRS repository",
