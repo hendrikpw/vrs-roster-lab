@@ -194,7 +194,7 @@ JBOEN
 
 class ParserTests(unittest.TestCase):
     def test_data_model_version_busts_streamlit_cache(self):
-        self.assertEqual(DATA_MODEL_VERSION, "timeline-invites-v1")
+        self.assertEqual(DATA_MODEL_VERSION, "phase2-pro-tools-v1")
 
     def test_standings_parser(self):
         rows = parse_standings(STANDINGS, "live/2026/standings_global_2026_07_06.md")
