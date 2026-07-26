@@ -1045,21 +1045,39 @@ def build_vrs_timeline(
     leaving: list[str] | None = None,
     replacements: list[str] | None = None,
     weeks: int = 26,
+    change_date: date | None = None,
 ) -> dict[str, Any]:
     snapshot_value = detail.get("snapshot_date", date.today().isoformat())
     snapshot_date = datetime.strptime(
         snapshot_value.replace("_", "-"), "%Y-%m-%d"
     ).date()
+    leaving = leaving or []
+    replacements = replacements or []
+    changes_requested = bool(leaving or replacements)
+    effective_change_date = max(change_date or snapshot_date, snapshot_date)
     rows: list[dict[str, Any]] = []
-    for week in range(max(0, weeks) + 1):
-        target = snapshot_date + timedelta(days=7 * week)
+    targets = {
+        snapshot_date + timedelta(days=7 * week)
+        for week in range(max(0, weeks) + 1)
+    }
+    timeline_end = snapshot_date + timedelta(days=7 * max(0, weeks))
+    if changes_requested and effective_change_date <= timeline_end:
+        targets.add(effective_change_date)
+    for target in sorted(targets):
         projection = project_vrs(detail, target, leaving, replacements)
+        change_active = changes_requested and target >= effective_change_date
         rows.append(
             {
                 "date": target.isoformat(),
                 "baseline_score": projection["baseline_score"],
                 "projected_score": projection["projected_score"],
                 "roster_delta": projection["roster_delta"],
+                "scenario_score": (
+                    projection["projected_score"]
+                    if change_active
+                    else projection["baseline_score"]
+                ),
+                "change_active": change_active,
             }
         )
     complete_rows = [row for row in rows if row["roster_delta"] is not None]
@@ -1068,7 +1086,11 @@ def build_vrs_timeline(
         if complete_rows
         else None
     )
-    return {"rows": rows, "best_window": best_window}
+    return {
+        "rows": rows,
+        "best_window": best_window,
+        "change_date": effective_change_date.isoformat() if changes_requested else None,
+    }
 
 
 def simulate_roster(
