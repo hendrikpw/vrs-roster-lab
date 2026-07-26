@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -203,6 +204,8 @@ def parse_hltv_team_detail(markdown: str, team_row: dict[str, Any]) -> dict[str,
                 "points": _float(cells[-1]),
                 "result": result,
                 "roster": list(team_row["roster"]),
+                "roster_verified": False,
+                "roster_source": "Unverified",
             }
         )
 
@@ -221,6 +224,8 @@ def parse_hltv_team_detail(markdown: str, team_row: dict[str, Any]) -> dict[str,
             "lan_adjusted": 0.0,
             "h2h": row["points"],
             "roster": list(team_row["roster"]),
+            "roster_verified": False,
+            "roster_source": "Unverified",
         }
         for index, row in enumerate(contributions)
         if row["component"] == "Head To Head"
@@ -245,31 +250,250 @@ def parse_hltv_team_detail(markdown: str, team_row: dict[str, Any]) -> dict[str,
     }
 
 
+def _normalized_tokens(value: str) -> set[str]:
+    normalized = value.casefold()
+    normalized = normalized.replace("epl", "esl pro league")
+    normalized = re.sub(r"\bs(\d+)\b", r"season \1", normalized)
+    normalized = (
+        normalized.replace("ó", "o")
+        .replace("ö", "o")
+        .replace("ø", "o")
+        .replace("ü", "u")
+        .replace("ä", "a")
+    )
+    return set(re.findall(r"[a-z0-9]+", normalized))
+
+
+def parse_hltv_result_links(markdown: str) -> list[dict[str, str]]:
+    current_date = ""
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in markdown.splitlines():
+        date_match = re.match(
+            r"Results for ([A-Za-z]+) (\d+)(?:st|nd|rd|th) (\d{4})", line.strip()
+        )
+        if date_match:
+            current_date = datetime.strptime(
+                f"{date_match.group(1)} {date_match.group(2)} {date_match.group(3)}",
+                "%B %d %Y",
+            ).date().isoformat()
+        for url in re.findall(
+            r"https://www\.hltv\.org/matches/\d+/[a-z0-9-]+", line
+        ):
+            if url not in seen and current_date:
+                seen.add(url)
+                links.append({"date": current_date, "url": url})
+    return links
+
+
+def parse_hltv_match_roster(
+    markdown: str, team_row: dict[str, Any], known_players: dict[str, str] | None = None
+) -> list[str]:
+    known_players = known_players or {}
+    team_url = team_row.get("team_url", "")
+    team_id_match = re.search(r"/team/(\d+)/", team_url)
+    lineup_text = markdown.split("\nLineups\n", 1)[-1]
+
+    slugs: list[str] = []
+    if team_id_match:
+        team_pattern = re.compile(
+            rf"\]\(https://www\.hltv\.org/team/{team_id_match.group(1)}/[^)]+\)"
+        )
+        team_match = team_pattern.search(lineup_text)
+        if team_match:
+            remainder = lineup_text[team_match.end():]
+            next_team = re.search(r"\]\(https://www\.hltv\.org/team/\d+/[^)]+\)", remainder)
+            team_block = remainder[:next_team.start()] if next_team else remainder[:5000]
+            for slug in re.findall(
+                r"https://www\.hltv\.org/player/\d+/([a-z0-9-]+)", team_block
+            ):
+                if slug not in slugs:
+                    slugs.append(slug)
+                if len(slugs) == 5:
+                    break
+
+    if len(slugs) != 5:
+        lines = [line.strip() for line in lineup_text.splitlines()]
+        team_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if _clean_markdown_label(line).casefold() == team_row["team"].casefold()
+            ),
+            None,
+        )
+        if team_index is not None:
+            world_rank_index = next(
+                (
+                    index
+                    for index in range(team_index + 1, min(team_index + 8, len(lines)))
+                    if "World rank:" in _clean_markdown_label(lines[index])
+                ),
+                None,
+            )
+            if world_rank_index is not None:
+                plain_names: list[str] = []
+                for line in lines[world_rank_index + 1:world_rank_index + 30]:
+                    cleaned = _clean_markdown_label(line)
+                    if not cleaned or cleaned.startswith("!["):
+                        continue
+                    if cleaned.casefold() == team_row["team"].casefold():
+                        continue
+                    if "World rank:" in cleaned:
+                        break
+                    if re.fullmatch(r"[\w.-]{1,24}", cleaned, re.UNICODE):
+                        plain_names.append(cleaned)
+                    if len(plain_names) == 5:
+                        break
+                if len(plain_names) == 5:
+                    return [
+                        known_players.get(normalize_player(name), name) for name in plain_names
+                    ]
+
+    if len(slugs) != 5:
+        return []
+    return [known_players.get(normalize_player(slug), slug) for slug in slugs]
+
+
+def _match_links_for_event(
+    event: str,
+    event_rows: list[dict[str, Any]],
+    result_links: list[dict[str, str]],
+) -> list[str]:
+    event_tokens = _normalized_tokens(event)
+    row_dates = [
+        datetime.fromisoformat(row["date"]).date()
+        for row in event_rows
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["date"])
+    ]
+    opponent_tokens = set().union(
+        *(_normalized_tokens(row["opponent"]) for row in event_rows if row.get("opponent"))
+    ) if any(row.get("opponent") for row in event_rows) else set()
+    representative_rows = [
+        row
+        for row in event_rows
+        if row["component"] in {"LAN Wins", "Opponent Network", "Bounty Collected"}
+        and row.get("opponent")
+    ]
+    candidates: list[tuple[float, int, int, int, int, str]] = []
+    for link in result_links:
+        slug_tokens = _normalized_tokens(link["url"].rsplit("/", 1)[-1])
+        event_overlap = len(event_tokens & slug_tokens)
+        if event_overlap == 0:
+            continue
+        opponent_overlap = len(opponent_tokens & slug_tokens)
+        link_date = datetime.fromisoformat(link["date"]).date()
+        distance = min((abs((link_date - row_date).days) for row_date in row_dates), default=999)
+        coverage = event_overlap / max(1, len(event_tokens))
+        representative_bonus = int(
+            any(
+                row["date"] == link["date"]
+                and bool(_normalized_tokens(row["opponent"]) & slug_tokens)
+                for row in representative_rows
+            )
+        )
+        candidates.append(
+            (
+                coverage,
+                representative_bonus,
+                opponent_overlap,
+                -distance,
+                -link_date.toordinal(),
+                link["url"],
+            )
+        )
+    return [candidate[-1] for candidate in sorted(candidates, reverse=True)[:6]]
+
+
+def load_hltv_event_rosters(
+    team_row: dict[str, Any],
+    contributions: list[dict[str, Any]],
+    known_players: dict[str, str] | None = None,
+    events_to_load: set[str] | None = None,
+) -> dict[str, list[str]]:
+    team_url = team_row.get("team_url", "")
+    team_id_match = re.search(r"/team/(\d+)/", team_url)
+    if not team_id_match:
+        return {}
+    results_url = f"https://www.hltv.org/results?team={team_id_match.group(1)}"
+    result_links = parse_hltv_result_links(_get_text(f"{JINA_BASE}{results_url}", timeout=30))
+    rows_by_event: dict[str, list[dict[str, Any]]] = {}
+    for row in contributions:
+        if row["event"] and (events_to_load is None or row["event"] in events_to_load):
+            rows_by_event.setdefault(row["event"], []).append(row)
+
+    event_urls = {
+        event: _match_links_for_event(event, rows, result_links)
+        for event, rows in rows_by_event.items()
+    }
+
+    def fetch_event_roster(urls: list[str]) -> list[str]:
+        for url in urls:
+            try:
+                markdown = _get_text(f"{JINA_BASE}{url}", timeout=30)
+                roster = parse_hltv_match_roster(markdown, team_row, known_players)
+            except VRSDataError:
+                roster = []
+            if len(roster) == 5:
+                return roster
+        return []
+
+    event_rosters: dict[str, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(fetch_event_roster, urls): event
+            for event, urls in event_urls.items()
+            if urls
+        }
+        for future in as_completed(futures):
+            event = futures[future]
+            try:
+                roster = future.result()
+            except Exception:
+                roster = []
+            if len(roster) == 5:
+                event_rosters[event] = roster
+    return event_rosters
+
+
 def _enrich_historical_rosters(
-    detail: dict[str, Any], official_detail: dict[str, Any] | None
+    detail: dict[str, Any],
+    official_detail: dict[str, Any] | None,
+    event_rosters: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    if not official_detail or not official_detail.get("matches"):
-        return detail
-    official_matches = official_detail["matches"]
+    event_rosters = event_rosters or {}
+    official_matches = official_detail.get("matches", []) if official_detail else []
     exact = {
         (match["date"], _clean_markdown_label(match["opponent"]).casefold()): match["roster"]
         for match in official_matches
     }
-    latest_official_date = max(match["date"] for match in official_matches)
+    latest_official_date = max(
+        (match["date"] for match in official_matches), default=""
+    )
 
-    def roster_for(row: dict[str, Any]) -> list[str]:
+    def roster_for(row: dict[str, Any]) -> tuple[list[str], bool, str]:
+        if row.get("event") in event_rosters:
+            return list(event_rosters[row["event"]]), True, "HLTV match lineup"
         key = (row["date"], _clean_markdown_label(row.get("opponent", "")).casefold())
         if key in exact:
-            return list(exact[key])
-        if row["date"] > latest_official_date:
-            return list(detail["roster"])
-        prior = [match for match in official_matches if match["date"] <= row["date"]]
-        return list(max(prior, key=lambda match: match["date"])["roster"]) if prior else list(detail["roster"])
+            return list(exact[key]), True, "Valve match detail"
+        if latest_official_date and row["date"] <= latest_official_date:
+            prior = [match for match in official_matches if match["date"] <= row["date"]]
+            if prior:
+                return (
+                    list(max(prior, key=lambda match: match["date"])["roster"]),
+                    True,
+                    "Valve roster timeline",
+                )
+        return [], False, "Unverified"
 
     for row in detail["contributions"]:
-        row["roster"] = roster_for(row)
+        row["roster"], row["roster_verified"], row["roster_source"] = roster_for(row)
     for row in detail["matches"]:
-        row["roster"] = roster_for(row)
+        row["roster"], row["roster_verified"], row["roster_source"] = roster_for(row)
+    detail["unverified_contributions"] = sum(
+        not row["roster_verified"] for row in detail["contributions"]
+    )
     return detail
 
 
@@ -280,7 +504,34 @@ def load_hltv_team_detail(
     if not detail_url.startswith("https://www.hltv.org/valve-ranking/teams/details/"):
         raise VRSDataError("Unexpected HLTV detail URL.")
     markdown = _get_text(f"{JINA_BASE}{detail_url}", timeout=30)
-    return _enrich_historical_rosters(parse_hltv_team_detail(markdown, team_row), official_detail)
+    detail = parse_hltv_team_detail(markdown, team_row)
+    known_players = {
+        normalize_player(player): player for player in detail["roster"]
+    }
+    if official_detail:
+        for match in official_detail.get("matches", []):
+            for player in match["roster"]:
+                known_players.setdefault(normalize_player(player), player)
+    official_matches = official_detail.get("matches", []) if official_detail else []
+    latest_official_date = max(
+        (match["date"] for match in official_matches), default=""
+    )
+    events_to_load = (
+        {
+            row["event"]
+            for row in detail["contributions"]
+            if row["event"] and row["date"] > latest_official_date
+        }
+        if latest_official_date
+        else None
+    )
+    try:
+        event_rosters = load_hltv_event_rosters(
+            team_row, detail["contributions"], known_players, events_to_load
+        )
+    except VRSDataError:
+        event_rosters = {}
+    return _enrich_historical_rosters(detail, official_detail, event_rosters)
 
 
 def discover_latest_snapshot(reference_date: date | None = None) -> dict[str, str]:
@@ -441,15 +692,24 @@ def simulate_roster(
     retained_h2h = 0.0
 
     for match in detail["matches"]:
+        verified = match.get("roster_verified", bool(match["roster"]))
         historical_keys = {normalize_player(name) for name in match["roster"]}
-        overlap = len(simulated_keys & historical_keys)
-        eligible = overlap >= 3
-        status = "Retained" if overlap >= 4 else "At risk" if overlap == 3 else "Lost"
+        overlap = len(simulated_keys & historical_keys) if verified else None
+        eligible = overlap >= 3 if overlap is not None else None
+        status = (
+            "Unknown"
+            if overlap is None
+            else "Retained"
+            if overlap >= 4
+            else "At risk"
+            if overlap == 3
+            else "Lost"
+        )
         factor_support = (
             match["bounty_adjusted"] + match["network_adjusted"] + match["lan_adjusted"]
         )
         total_factor_support += factor_support
-        if eligible:
+        if eligible is True:
             retained_factor_support += factor_support
             retained_h2h += match["h2h"]
         rows.append({**match, "overlap": overlap, "eligible": eligible, "status": status})
@@ -458,10 +718,19 @@ def simulate_roster(
     event_groups: dict[str, dict[str, Any]] = {}
     if detail.get("contributions"):
         for contribution in detail["contributions"]:
+            verified = contribution.get("roster_verified", bool(contribution["roster"]))
             historical_keys = {normalize_player(name) for name in contribution["roster"]}
-            overlap = len(simulated_keys & historical_keys)
-            eligible = overlap >= 3
-            status = "Retained" if overlap >= 4 else "At risk" if overlap == 3 else "Lost"
+            overlap = len(simulated_keys & historical_keys) if verified else None
+            eligible = overlap >= 3 if overlap is not None else None
+            status = (
+                "Unknown"
+                if overlap is None
+                else "Retained"
+                if overlap >= 4
+                else "At risk"
+                if overlap == 3
+                else "Lost"
+            )
             row = {**contribution, "overlap": overlap, "eligible": eligible, "status": status}
             contribution_rows.append(row)
             event = contribution["event"] or "Other"
@@ -472,17 +741,22 @@ def simulate_roster(
                     "current_points": 0.0,
                     "retained_points": 0.0,
                     "lost_points": 0.0,
+                    "unknown_points": 0.0,
                     "rows": 0,
                     "eligible_rows": 0,
+                    "unknown_rows": 0,
                 },
             )
             group["current_points"] += contribution["points"]
             group["rows"] += 1
-            if eligible:
+            if eligible is True:
                 group["retained_points"] += contribution["points"]
                 group["eligible_rows"] += 1
-            else:
+            elif eligible is False:
                 group["lost_points"] += contribution["points"]
+            else:
+                group["unknown_points"] += contribution["points"]
+                group["unknown_rows"] += 1
 
         retained_components: dict[str, float] = {}
         for component, headline_points in detail["factors"].items():
@@ -492,13 +766,13 @@ def simulate_roster(
             if component == "Head To Head":
                 retained_components[component] = (
                     headline_points
-                    if component_rows and all(row["eligible"] for row in component_rows)
-                    else sum(row["points"] for row in component_rows if row["eligible"])
+                    if component_rows and all(row["eligible"] is True for row in component_rows)
+                    else sum(row["points"] for row in component_rows if row["eligible"] is True)
                 )
             else:
                 listed_total = sum(row["points"] for row in component_rows)
                 listed_retained = sum(
-                    row["points"] for row in component_rows if row["eligible"]
+                    row["points"] for row in component_rows if row["eligible"] is True
                 )
                 retained_components[component] = (
                     headline_points * listed_retained / listed_total if listed_total else 0.0
@@ -511,15 +785,26 @@ def simulate_roster(
         )
         factor_ratio = positive_retained / positive_total if positive_total else 1.0
         all_eligible = bool(contribution_rows) and all(
-            row["eligible"] for row in contribution_rows
+            row["eligible"] is True for row in contribution_rows
         )
-        indicative_score = (
-            detail["final_score"]
-            if all_eligible
-            else max(400.0, 400.0 + sum(retained_components.values()))
-        )
+        has_unknown = any(row["eligible"] is None for row in contribution_rows)
+        changes_requested = bool(leaving or replacements)
+        simulation_complete = not has_unknown or not changes_requested
+        if not changes_requested or all_eligible:
+            indicative_score = detail["final_score"]
+            factor_ratio = 1.0
+        elif not simulation_complete:
+            indicative_score = None
+            factor_ratio = None
+        else:
+            indicative_score = max(400.0, 400.0 + sum(retained_components.values()))
         for group in event_groups.values():
             group["status"] = (
+                "Unknown"
+                if group["unknown_rows"] == group["rows"]
+                else "Partial / unknown"
+                if group["unknown_rows"] > 0
+                else
                 "Retained"
                 if group["eligible_rows"] == group["rows"]
                 else "Lost"
@@ -527,6 +812,7 @@ def simulate_roster(
                 else "Partial"
             )
     else:
+        simulation_complete = True
         all_eligible = bool(rows) and all(row["eligible"] for row in rows)
         factor_ratio = (
             retained_factor_support / total_factor_support if total_factor_support > 0 else 1.0
@@ -539,7 +825,7 @@ def simulate_roster(
 
     core_groups: dict[str, dict[str, Any]] = {}
     for row in rows:
-        key = ", ".join(row["roster"])
+        key = ", ".join(row["roster"]) if row["roster"] else "Unverified roster"
         group = core_groups.setdefault(
             key,
             {
@@ -561,12 +847,16 @@ def simulate_roster(
             event_groups.values(), key=lambda row: row["current_points"], reverse=True
         ),
         "core_groups": list(core_groups.values()),
-        "retained_matches": sum(row["eligible"] for row in rows),
-        "lost_matches": sum(not row["eligible"] for row in rows),
+        "retained_matches": sum(row["eligible"] is True for row in rows),
+        "lost_matches": sum(row["eligible"] is False for row in rows),
+        "unknown_matches": sum(row["eligible"] is None for row in rows),
         "fragile_matches": sum(row["status"] == "At risk" for row in rows),
         "factor_ratio": factor_ratio,
         "indicative_score": indicative_score,
-        "indicative_delta": indicative_score - detail["final_score"],
+        "indicative_delta": (
+            indicative_score - detail["final_score"] if indicative_score is not None else None
+        ),
+        "simulation_complete": simulation_complete,
     }
 
 
