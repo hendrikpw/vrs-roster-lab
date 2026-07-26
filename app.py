@@ -679,6 +679,7 @@ with timeline_tab:
 
         chart_records: list[dict] = []
         marker_records: list[dict] = []
+        comparison_point_records: list[dict] = []
         summary_records: list[dict] = []
         incomplete_scenarios: list[str] = []
         change_notes: list[str] = []
@@ -752,6 +753,34 @@ with timeline_tab:
                     "Roster scenario": change_description,
                 }
             )
+            if scenario_score is not None:
+                chart_records.append(
+                    {
+                        "Date": target_date.isoformat(),
+                        "Team": team_name,
+                        "VRS": scenario_score,
+                        "Path": scenario_label,
+                    }
+                )
+                if scenario["changes_requested"]:
+                    chart_records.append(
+                        {
+                            "Date": target_date.isoformat(),
+                            "Team": team_name,
+                            "VRS": projection["baseline_score"],
+                            "Path": "Same-roster baseline",
+                        }
+                    )
+                comparison_point_records.append(
+                    {
+                        "Date": target_date.isoformat(),
+                        "Team": team_name,
+                        "VRS": scenario_score,
+                        "Same-roster baseline": projection["baseline_score"],
+                        "Roster impact": roster_impact,
+                        "Roster scenario": change_description,
+                    }
+                )
 
             if scenario["changes_requested"]:
                 marker_projection = project_vrs(
@@ -779,6 +808,13 @@ with timeline_tab:
 
         chart_data = pd.DataFrame(chart_records)
         chart_data["Date"] = pd.to_datetime(chart_data["Date"])
+        chart_data = (
+            chart_data.drop_duplicates(
+                subset=["Date", "Team", "Path"],
+                keep="last",
+            )
+            .sort_values(["Team", "Path", "Date"])
+        )
         team_domain = list(comparison_details)
         team_colors = ["#e23a32", "#2e7d5b", "#d89b2b", "#386a8c", "#7d4f96"]
         color_encoding = alt.Color(
@@ -818,6 +854,71 @@ with timeline_tab:
                 ],
             )
         )
+        hover_targets = (
+            alt.Chart(chart_data)
+            .mark_point(size=120, opacity=0.001)
+            .encode(
+                x="Date:T",
+                y="VRS:Q",
+                color=color_encoding,
+                detail=["Team:N", "Path:N"],
+                tooltip=[
+                    alt.Tooltip("Team:N"),
+                    alt.Tooltip("Path:N"),
+                    alt.Tooltip("Date:T", format="%Y-%m-%d"),
+                    alt.Tooltip("VRS:Q", title="VRS points", format=",.0f"),
+                ],
+            )
+        )
+        timeline_chart = timeline_chart + hover_targets
+
+        if comparison_point_records:
+            comparison_points_data = pd.DataFrame(comparison_point_records)
+            comparison_points_data["Date"] = pd.to_datetime(
+                comparison_points_data["Date"]
+            )
+            comparison_date_rule = (
+                alt.Chart(pd.DataFrame({"Date": [pd.Timestamp(target_date)]}))
+                .mark_rule(color="#6d685e", strokeDash=[5, 5], strokeWidth=2)
+                .encode(x="Date:T")
+            )
+            comparison_points = (
+                alt.Chart(comparison_points_data)
+                .mark_point(
+                    filled=True,
+                    shape="circle",
+                    size=190,
+                    stroke="#f3f0e8",
+                    strokeWidth=3,
+                )
+                .encode(
+                    x="Date:T",
+                    y="VRS:Q",
+                    color=color_encoding,
+                    tooltip=[
+                        alt.Tooltip("Team:N"),
+                        alt.Tooltip(
+                            "Date:T",
+                            title="Comparison date",
+                            format="%Y-%m-%d",
+                        ),
+                        alt.Tooltip("VRS:Q", title="Scenario VRS", format=",.0f"),
+                        alt.Tooltip(
+                            "Same-roster baseline:Q",
+                            format=",.0f",
+                        ),
+                        alt.Tooltip(
+                            "Roster impact:Q",
+                            format="+,.0f",
+                        ),
+                        alt.Tooltip("Roster scenario:N"),
+                    ],
+                )
+            )
+            timeline_chart = (
+                timeline_chart + comparison_date_rule + comparison_points
+            )
+
         if marker_records:
             marker_data = pd.DataFrame(marker_records)
             marker_data = marker_data.dropna(subset=["VRS"])
@@ -859,6 +960,28 @@ with timeline_tab:
             ascending=False,
             na_position="last",
         )
+        st.markdown(f"#### Comparison on {target_date.isoformat()}")
+        ranked_rows = comparison_table.dropna(subset=["Scenario VRS"]).to_dict(
+            orient="records"
+        )
+        if ranked_rows:
+            comparison_columns = st.columns(len(ranked_rows))
+            for rank, (column, row) in enumerate(
+                zip(comparison_columns, ranked_rows),
+                start=1,
+            ):
+                impact = row["Roster impact"]
+                delta_text = (
+                    f"{impact:+,.0f} roster impact"
+                    if impact
+                    else "same-roster path"
+                )
+                column.metric(
+                    f"#{rank} · {row['Team']}",
+                    f"{row['Scenario VRS']:,.0f} VRS",
+                    delta_text,
+                    delta_color="normal" if impact else "off",
+                )
         st.dataframe(
             comparison_table,
             width="stretch",
