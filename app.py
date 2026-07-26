@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from vrs_data import (
+    DATA_MODEL_VERSION,
     VRSDataError,
     fallback_data,
     load_hltv_live_standings,
@@ -136,8 +137,14 @@ def get_official_detail(url: str):
     return load_team_detail(url)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_live_detail(team_row: dict, official_detail: dict | None):
+@st.cache_data(ttl=900, show_spinner=False)
+def get_live_detail(
+    team_row: dict,
+    official_detail: dict | None,
+    data_model_version: str,
+):
+    # The explicit version argument invalidates Streamlit's cache when roster
+    # attribution changes inside the imported data module.
     return load_hltv_team_detail(team_row, official_detail)
 
 
@@ -187,7 +194,7 @@ try:
                 official_detail = get_official_detail(official_row["detail_url"])
         except VRSDataError:
             pass
-        detail = get_live_detail(selected, official_detail)
+        detail = get_live_detail(selected, official_detail, DATA_MODEL_VERSION)
     else:
         detail = (
             fallback_detail
@@ -351,6 +358,10 @@ with analysis_tab:
             match_rows["Core overlap"] = match_rows["overlap"].apply(
                 lambda value: f"{int(value)} / 5" if pd.notna(value) else "Unknown"
             )
+            match_rows["Lineup source"] = match_rows.apply(
+                lambda row: row.get("roster_source", "Bundled / official"),
+                axis=1,
+            )
             match_rows["H2H"] = match_rows["h2h"].map(lambda value: f"{value:+.2f}")
             match_rows["Factor support"] = (
                 match_rows["bounty_adjusted"]
@@ -365,6 +376,7 @@ with analysis_tab:
                     "result",
                     "Core",
                     "Core overlap",
+                    "Lineup source",
                     "H2H",
                     "status",
                 ]
