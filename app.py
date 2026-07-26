@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 from datetime import date, datetime, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -202,6 +203,31 @@ def get_active_map_pool(data_model_version: str):
     return load_active_map_pool()
 
 
+def resolve_team_detail(team_row: dict) -> dict:
+    """Load one ranked team's richest available VRS detail."""
+    if team_row.get("source") == "HLTV Live VRS (Beta)":
+        official_detail = None
+        try:
+            _, official_rows = get_official_standings()
+            official_row = next(
+                (
+                    row
+                    for row in official_rows
+                    if row["team"].casefold() == team_row["team"].casefold()
+                ),
+                None,
+            )
+            if official_row and official_row["detail_url"]:
+                official_detail = get_official_detail(official_row["detail_url"])
+        except VRSDataError:
+            pass
+        return get_live_detail(team_row, official_detail, DATA_MODEL_VERSION)
+
+    if not team_row.get("detail_url"):
+        raise VRSDataError(f"No VRS detail is available for {team_row['team']}.")
+    return get_official_detail(team_row["detail_url"])
+
+
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
 using_fallback = False
 try:
@@ -235,25 +261,7 @@ selected_name = st.selectbox(
 selected = next(row for row in standings if row["team"] == selected_name)
 
 try:
-    if selected.get("source") == "HLTV Live VRS (Beta)":
-        official_detail = None
-        try:
-            _, official_rows = get_official_standings()
-            official_row = next(
-                (row for row in official_rows if row["team"].casefold() == selected_name.casefold()),
-                None,
-            )
-            if official_row and official_row["detail_url"]:
-                official_detail = get_official_detail(official_row["detail_url"])
-        except VRSDataError:
-            pass
-        detail = get_live_detail(selected, official_detail, DATA_MODEL_VERSION)
-    else:
-        detail = (
-            fallback_detail
-            if using_fallback or not selected["detail_url"]
-            else get_official_detail(selected["detail_url"])
-        )
+    detail = fallback_detail if using_fallback else resolve_team_detail(selected)
 except VRSDataError:
     detail = fallback_detail
     using_fallback = True
@@ -547,144 +555,329 @@ with analysis_tab:
                 )
 
 with timeline_tab:
-    st.subheader(f"VRS timeline · {detail['team']}")
+    st.subheader("VRS timeline comparison")
     st.caption(
-        "Project the currently listed VRS contributions forward with no new results, "
-        "then compare that baseline with a simulated roster."
+        "Compare up to five teams on one timeline. Add an optional dated roster scenario "
+        "for each team to see when historical results would stop carrying over."
     )
-    if not detail.get("contributions"):
+    comparison_team_names = st.multiselect(
+        "Teams to compare",
+        team_names,
+        default=[selected_name],
+        max_selections=5,
+        key="timeline_comparison_teams",
+        help="Choose up to five teams from the current live VRS ranking.",
+    )
+
+    comparison_details: dict[str, dict] = {}
+    unavailable_teams: list[str] = []
+    for comparison_name in comparison_team_names:
+        try:
+            comparison_detail = (
+                detail
+                if comparison_name == selected_name
+                else resolve_team_detail(
+                    next(row for row in standings if row["team"] == comparison_name)
+                )
+            )
+        except VRSDataError:
+            unavailable_teams.append(comparison_name)
+            continue
+        if comparison_detail.get("contributions"):
+            comparison_details[comparison_name] = comparison_detail
+        else:
+            unavailable_teams.append(comparison_name)
+
+    if unavailable_teams:
+        st.warning(
+            "Live contribution data is unavailable for: "
+            + ", ".join(unavailable_teams)
+            + "."
+        )
+
+    if not comparison_team_names:
+        st.info("Select at least one team to build the comparison.")
+    elif not comparison_details:
         st.info(
             "Timeline projections require HLTV's live contribution rows and are unavailable "
             "while the app is using an official or bundled fallback snapshot."
         )
     else:
-        snapshot_day = datetime.strptime(
-            detail["snapshot_date"].replace("_", "-"), "%Y-%m-%d"
-        ).date()
-        controls, summary = st.columns([0.9, 1.6], gap="large")
-        with controls:
-            target_date = st.date_input(
-                "Projection date",
-                value=snapshot_day + timedelta(days=30),
-                min_value=snapshot_day,
-                max_value=snapshot_day + timedelta(days=183),
-                help="The model can project until all currently listed results have aged out.",
-            )
-            timeline_leaving = st.multiselect(
-                "Players leaving",
-                detail["roster"],
-                key="timeline_players_leaving",
-            )
-            timeline_replacements_text = st.text_input(
-                "Replacement players",
-                placeholder="Enter comma-separated player nicknames",
-                key="timeline_replacements",
-            )
-            timeline_replacements = [
-                name.strip()
-                for name in timeline_replacements_text.split(",")
-                if name.strip()
-            ]
-            projection = project_vrs(
-                detail,
-                target_date,
-                timeline_leaving,
-                timeline_replacements,
-            )
-        with summary:
-            metric_columns = st.columns(4)
-            metric_columns[0].metric("Current VRS", f"{detail['final_score']:,.0f}")
-            metric_columns[1].metric(
-                "No-new-results baseline",
-                f"{projection['baseline_score']:,.0f}",
-                f"{projection['decay_delta']:+,.0f}",
-            )
-            metric_columns[2].metric(
-                "Simulated roster",
-                (
-                    f"{projection['projected_score']:,.0f}"
-                    if projection["projected_score"] is not None
-                    else "N/A"
-                ),
-            )
-            metric_columns[3].metric(
-                "Roster-only impact",
-                (
-                    f"{projection['roster_delta']:+,.0f}"
-                    if projection["roster_delta"] is not None
-                    else "N/A"
-                ),
-            )
-            if not projection["projection_complete"]:
-                st.warning(
-                    f"{projection['unknown_rows']} historical contribution rows have no verified "
-                    "lineup, so the changed-roster projection is intentionally withheld."
+        snapshot_days = {
+            team_name: datetime.strptime(
+                team_detail["snapshot_date"].replace("_", "-"), "%Y-%m-%d"
+            ).date()
+            for team_name, team_detail in comparison_details.items()
+        }
+        latest_snapshot_day = max(snapshot_days.values())
+        target_date = st.date_input(
+            "Comparison date",
+            value=latest_snapshot_day + timedelta(days=30),
+            min_value=latest_snapshot_day,
+            max_value=latest_snapshot_day + timedelta(days=183),
+            help="The summary table compares all selected teams on this date.",
+            key="timeline_comparison_date",
+        )
+
+        st.markdown("#### Roster scenarios")
+        st.caption(
+            "Open a team, enable a change and set the exact date. The chart keeps the "
+            "current-roster path before that date and applies the new roster afterwards."
+        )
+        team_scenarios: dict[str, dict] = {}
+        for team_name, team_detail in comparison_details.items():
+            team_key = f"timeline_team_{team_detail['global_rank']}"
+            with st.expander(
+                f"{team_name} · {team_detail['final_score']:,.0f} VRS",
+                expanded=len(comparison_details) == 1,
+            ):
+                enable_change = st.checkbox(
+                    "Simulate a roster change",
+                    key=f"{team_key}_enabled",
                 )
+                if enable_change:
+                    roster_col, replacement_col, date_col = st.columns(
+                        [1.25, 1.25, 0.9],
+                        gap="medium",
+                    )
+                    with roster_col:
+                        team_leaving = st.multiselect(
+                            "Players leaving",
+                            team_detail["roster"],
+                            key=f"{team_key}_leaving",
+                        )
+                    with replacement_col:
+                        replacements_text = st.text_input(
+                            "Replacement players",
+                            placeholder="Comma-separated nicknames",
+                            key=f"{team_key}_replacements",
+                        )
+                    with date_col:
+                        team_change_date = st.date_input(
+                            "Change date",
+                            value=snapshot_days[team_name],
+                            min_value=snapshot_days[team_name],
+                            max_value=snapshot_days[team_name] + timedelta(days=183),
+                            key=f"{team_key}_change_date",
+                        )
+                    team_replacements = [
+                        name.strip()
+                        for name in replacements_text.split(",")
+                        if name.strip()
+                    ]
+                else:
+                    team_leaving = []
+                    team_replacements = []
+                    team_change_date = snapshot_days[team_name]
 
-        timeline = build_vrs_timeline(
-            detail,
-            timeline_leaving,
-            timeline_replacements,
-        )
-        chart_rows = pd.DataFrame(timeline["rows"])
-        chart_rows["Date"] = pd.to_datetime(chart_rows["date"])
-        chart_rows = chart_rows.set_index("Date")[
-            ["baseline_score", "projected_score"]
-        ].rename(
-            columns={
-                "baseline_score": "Same roster",
-                "projected_score": "Simulated roster",
-            }
-        )
-        st.line_chart(chart_rows, color=["#6d685e", "#e23a32"])
+                team_scenarios[team_name] = {
+                    "leaving": team_leaving,
+                    "replacements": team_replacements,
+                    "change_date": team_change_date,
+                    "changes_requested": bool(team_leaving or team_replacements),
+                }
 
-        best_window = timeline["best_window"]
-        if (timeline_leaving or timeline_replacements) and best_window:
-            st.markdown(
-                f"**Least damaging modeled change window:** "
-                f"{best_window['date']} · roster-only impact "
-                f"{best_window['roster_delta']:+,.0f} points."
+        chart_records: list[dict] = []
+        marker_records: list[dict] = []
+        summary_records: list[dict] = []
+        incomplete_scenarios: list[str] = []
+        change_notes: list[str] = []
+
+        for team_name, team_detail in comparison_details.items():
+            scenario = team_scenarios[team_name]
+            timeline = build_vrs_timeline(
+                team_detail,
+                scenario["leaving"],
+                scenario["replacements"],
+                change_date=scenario["change_date"],
             )
+            scenario_label = (
+                "Planned roster"
+                if scenario["changes_requested"]
+                else "Current roster"
+            )
+            for row in timeline["rows"]:
+                chart_records.append(
+                    {
+                        "Date": row["date"],
+                        "Team": team_name,
+                        "VRS": row["scenario_score"],
+                        "Path": scenario_label,
+                    }
+                )
+                if scenario["changes_requested"]:
+                    chart_records.append(
+                        {
+                            "Date": row["date"],
+                            "Team": team_name,
+                            "VRS": row["baseline_score"],
+                            "Path": "Same-roster baseline",
+                        }
+                    )
 
-        event_rows = pd.DataFrame(projection["event_groups"])
-        if not event_rows.empty:
-            event_display = event_rows[
-                [
-                    "event",
-                    "current_points",
-                    "baseline_points",
-                    "simulated_points",
-                    "roster_delta",
-                    "status",
-                ]
-            ].rename(
-                columns={
-                    "event": "Event",
-                    "current_points": "Current",
-                    "baseline_points": "At target date",
-                    "simulated_points": "With roster",
-                    "roster_delta": "Roster impact",
-                    "status": "Status",
+            projection = project_vrs(
+                team_detail,
+                target_date,
+                scenario["leaving"],
+                scenario["replacements"],
+            )
+            change_is_active = (
+                scenario["changes_requested"]
+                and target_date >= scenario["change_date"]
+            )
+            scenario_score = (
+                projection["projected_score"]
+                if change_is_active
+                else projection["baseline_score"]
+            )
+            roster_impact = (
+                scenario_score - projection["baseline_score"]
+                if scenario_score is not None
+                else None
+            )
+            outgoing = ", ".join(scenario["leaving"]) or "—"
+            incoming = ", ".join(scenario["replacements"]) or "—"
+            change_description = (
+                f"{scenario['change_date'].isoformat()} · {outgoing} → {incoming}"
+                if scenario["changes_requested"]
+                else "No change"
+            )
+            summary_records.append(
+                {
+                    "Team": team_name,
+                    "Current VRS": team_detail["final_score"],
+                    "Same-roster baseline": projection["baseline_score"],
+                    "Scenario VRS": scenario_score,
+                    "Roster impact": roster_impact,
+                    "Roster scenario": change_description,
                 }
             )
-            st.dataframe(
-                event_display,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Current": st.column_config.NumberColumn(format="%.0f"),
-                    "At target date": st.column_config.NumberColumn(format="%.0f"),
-                    "With roster": st.column_config.NumberColumn(format="%.0f"),
-                    "Roster impact": st.column_config.NumberColumn(format="%+.0f"),
-                },
+
+            if scenario["changes_requested"]:
+                marker_projection = project_vrs(
+                    team_detail,
+                    scenario["change_date"],
+                    scenario["leaving"],
+                    scenario["replacements"],
+                )
+                marker_score = marker_projection["projected_score"]
+                marker_records.append(
+                    {
+                        "Date": scenario["change_date"].isoformat(),
+                        "Team": team_name,
+                        "VRS": marker_score,
+                        "Change": f"{outgoing} → {incoming}",
+                    }
+                )
+                if marker_score is None:
+                    incomplete_scenarios.append(team_name)
+                else:
+                    change_notes.append(
+                        f"**{team_name}:** {scenario['change_date'].isoformat()} · "
+                        f"{outgoing} → {incoming}"
+                    )
+
+        chart_data = pd.DataFrame(chart_records)
+        chart_data["Date"] = pd.to_datetime(chart_data["Date"])
+        team_domain = list(comparison_details)
+        team_colors = ["#e23a32", "#2e7d5b", "#d89b2b", "#386a8c", "#7d4f96"]
+        color_encoding = alt.Color(
+            "Team:N",
+            scale=alt.Scale(domain=team_domain, range=team_colors[: len(team_domain)]),
+            legend=alt.Legend(title="Team"),
+        )
+        timeline_chart = (
+            alt.Chart(chart_data)
+            .mark_line(strokeWidth=3)
+            .encode(
+                x=alt.X("Date:T", title=None),
+                y=alt.Y(
+                    "VRS:Q",
+                    title="VRS points",
+                    scale=alt.Scale(zero=False),
+                ),
+                color=color_encoding,
+                strokeDash=alt.StrokeDash(
+                    "Path:N",
+                    scale=alt.Scale(
+                        domain=[
+                            "Current roster",
+                            "Planned roster",
+                            "Same-roster baseline",
+                        ],
+                        range=[[1, 0], [1, 0], [7, 5]],
+                    ),
+                    legend=alt.Legend(title="Path"),
+                ),
+                detail=["Team:N", "Path:N"],
+                tooltip=[
+                    alt.Tooltip("Team:N"),
+                    alt.Tooltip("Path:N"),
+                    alt.Tooltip("Date:T", format="%Y-%m-%d"),
+                    alt.Tooltip("VRS:Q", format=",.0f"),
+                ],
             )
+        )
+        if marker_records:
+            marker_data = pd.DataFrame(marker_records)
+            marker_data = marker_data.dropna(subset=["VRS"])
+            marker_data["Date"] = pd.to_datetime(marker_data["Date"])
+            if not marker_data.empty:
+                change_markers = (
+                    alt.Chart(marker_data)
+                    .mark_point(filled=True, shape="diamond", size=150, stroke="#151515")
+                    .encode(
+                        x="Date:T",
+                        y="VRS:Q",
+                        color=color_encoding,
+                        tooltip=[
+                            alt.Tooltip("Team:N"),
+                            alt.Tooltip("Date:T", title="Roster change", format="%Y-%m-%d"),
+                            alt.Tooltip("Change:N"),
+                            alt.Tooltip("VRS:Q", format=",.0f"),
+                        ],
+                    )
+                )
+                timeline_chart = timeline_chart + change_markers
+
+        st.altair_chart(
+            timeline_chart.properties(height=460).interactive(),
+            width="stretch",
+        )
+
+        if change_notes:
+            st.markdown(" · ".join(change_notes))
+        if incomplete_scenarios:
+            st.warning(
+                "The changed-roster projection is unavailable for "
+                + ", ".join(sorted(set(incomplete_scenarios)))
+                + " because some historical contribution rows have no verified lineup."
+            )
+
+        comparison_table = pd.DataFrame(summary_records).sort_values(
+            "Scenario VRS",
+            ascending=False,
+            na_position="last",
+        )
+        st.dataframe(
+            comparison_table,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Current VRS": st.column_config.NumberColumn(format="%.0f"),
+                "Same-roster baseline": st.column_config.NumberColumn(format="%.0f"),
+                "Scenario VRS": st.column_config.NumberColumn(format="%.0f"),
+                "Roster impact": st.column_config.NumberColumn(format="%+.0f"),
+            },
+        )
         st.markdown(
             """
             <div class="disclaimer">
-              Timeline assumption: the team plays no new matches. Existing results keep full
-              recency weight for 30 days and then decay linearly to zero by day 183. This is an
-              explanatory projection, not an official future score: Valve will recalculate the
-              global opponent network, top-ten selections, bounties and head-to-head values.
+              Diamond markers indicate scheduled roster changes. Solid lines show each selected
+              scenario; dashed lines show where the same team would project with its current
+              roster. The model assumes no new matches: existing results retain full recency
+              weight for 30 days and decay linearly to zero by day 183. This is an explanatory
+              comparison, not an official future ranking.
             </div>
             """,
             unsafe_allow_html=True,
