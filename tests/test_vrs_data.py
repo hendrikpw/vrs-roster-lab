@@ -186,6 +186,49 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(all(row["status"] == "Unknown" for row in result["contribution_rows"]))
         self.assertTrue(all(group["status"] == "Unknown" for group in result["event_groups"]))
 
+    def test_losing_negative_h2h_can_raise_indicative_score(self):
+        detail = {
+            "team": "Example",
+            "roster": ["a", "b", "c", "d", "e"],
+            "final_score": 470.0,
+            "starting_score": 500.0,
+            "h2h_total": -30.0,
+            "factors": {"Bounty Offered": 100.0, "Head To Head": -30.0},
+            "matches": [],
+            "contributions": [
+                {
+                    "date": "2026-07-01",
+                    "opponent": "",
+                    "event": "Recent event",
+                    "component": "Bounty Offered",
+                    "points": 100.0,
+                    "result": "",
+                    "roster": ["a", "b", "c", "d", "e"],
+                    "roster_verified": True,
+                },
+                {
+                    "date": "2026-04-01",
+                    "opponent": "Old opponent",
+                    "event": "Old event",
+                    "component": "Head To Head",
+                    "points": -30.0,
+                    "result": "L",
+                    "roster": ["a", "b", "c", "y", "z"],
+                    "roster_verified": True,
+                },
+            ],
+            "prizes": [],
+        }
+        result = simulate_roster(detail, ["c"], ["x"])
+        self.assertEqual(result["indicative_score"], 500.0)
+        self.assertEqual(result["indicative_delta"], 30.0)
+        h2h = next(
+            row
+            for row in result["component_breakdown"]
+            if row["component"] == "Head To Head"
+        )
+        self.assertEqual(h2h["change"], 30.0)
+
     def test_hltv_result_dates_and_plain_match_lineup(self):
         links = parse_hltv_result_links(HLTV_RESULTS)
         self.assertEqual(links[0]["date"], "2026-07-03")
