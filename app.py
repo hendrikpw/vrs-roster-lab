@@ -205,11 +205,10 @@ st.markdown(
 )
 
 team_names = [row["team"] for row in standings]
-default_index = team_names.index("FaZe") if "FaZe" in team_names else 0
 selected_name = st.selectbox(
     "Select a ranked team",
     team_names,
-    index=default_index,
+    index=0,
     help="Teams from HLTV's current live VRS calculation.",
 )
 selected = next(row for row in standings if row["team"] == selected_name)
@@ -280,7 +279,7 @@ with analysis_tab:
         )
         replacements_text = st.text_input(
             "Replacement players",
-            placeholder="e.g. siuhy, lauNX",
+            placeholder="Enter comma-separated player nicknames",
             help="Optional. Re-signing a historical player can restore overlap with an older core.",
         )
         replacements = [name.strip() for name in replacements_text.split(",") if name.strip()]
@@ -556,7 +555,7 @@ with timeline_tab:
             )
             timeline_replacements_text = st.text_input(
                 "Replacement players",
-                placeholder="e.g. siuhy, lauNX",
+                placeholder="Enter comma-separated player nicknames",
                 key="timeline_replacements",
             )
             timeline_replacements = [
@@ -807,7 +806,7 @@ with transfer_tab:
     with transfer_controls[1]:
         candidate_query = st.text_input(
             "Candidate",
-            placeholder="e.g. lauNX, siuhy, HeavyGod",
+            placeholder="Enter a professional player nickname",
             key="transfer_candidate_query",
             help="Enter a professional player's nickname. The closest exact BO3.gg profile is used.",
         )
@@ -1018,11 +1017,8 @@ with veto_tab:
             index=team_names.index(selected_name),
             key="veto_team_a",
         )
-    default_opponent = (
-        "Spirit"
-        if "Spirit" in team_names and selected_name != "Spirit"
-        else next(name for name in team_names if name != selected_name)
-    )
+    opponent_options = [name for name in team_names if name != selected_name]
+    default_opponent = opponent_options[0] if opponent_options else selected_name
     with veto_controls[1]:
         team_b_name = st.selectbox(
             "Team B",
