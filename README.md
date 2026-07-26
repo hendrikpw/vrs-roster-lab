@@ -20,6 +20,11 @@ how Counter-Strike roster changes affect the inheritance of historical results.
   least damaging modeled change window.
 - Loads HLTV's upcoming VRS invite calendar and predicted event rankings, including
   the invite cutoff, point gap and regional invite track where available.
+- Compares transfer candidates with current players across recent form, map ratings,
+  opening duels, trading, side results and statistical playstyle indicators.
+- Places the candidate's sporting profile beside the modeled VRS inheritance cost.
+- Builds BO3 and BO5 veto suggestions from recent map results plus team-owned picks
+  and bans, with smoothed map and series probabilities.
 
 ## Run locally
 
@@ -46,6 +51,9 @@ streamlit run app.py
   provide upcoming invite dates and predicted qualification lines.
 - [Valve's official VRS repository](https://github.com/ValveSoftware/counter-strike_regional_standings)
   provides the official periodic snapshots and historical match lineups.
+- [BO3.gg](https://bo3.gg/) provides the automated pro-player, map-result and veto
+  statistics used by Transfer Lab and Map Veto. Its player rating is a separate
+  10-point metric and is not HLTV Rating 3.0.
 
 The simulated score is an inheritance estimate, not an official reranking. A roster
 change can alter the global opponent network, top-ten selection and head-to-head
