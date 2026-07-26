@@ -14,6 +14,12 @@ how Counter-Strike roster changes affect the inheritance of historical results.
   to historical results.
 - Marks unresolved lineups as unknown and withholds the simulated score rather than
   reporting a false retained/lost result.
+- Projects the currently listed contributions across Valve's six-month recency window
+  under an explicit "no new results" assumption.
+- Compares the same-roster decay curve with a simulated roster and identifies the
+  least damaging modeled change window.
+- Loads HLTV's upcoming VRS invite calendar and predicted event rankings, including
+  the invite cutoff, point gap and regional invite track where available.
 
 ## Run locally
 
@@ -36,6 +42,8 @@ streamlit run app.py
 - [HLTV Live VRS Beta](https://www.hltv.org/valve-ranking/teams) is the primary,
   frequently updated source. It may include matches and secured prize money from
   unfinished events.
+- [HLTV's VRS invite predictions](https://www.hltv.org/valve-ranking/invites)
+  provide upcoming invite dates and predicted qualification lines.
 - [Valve's official VRS repository](https://github.com/ValveSoftware/counter-strike_regional_standings)
   provides the official periodic snapshots and historical match lineups.
 
