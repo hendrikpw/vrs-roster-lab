@@ -2,6 +2,8 @@ import unittest
 
 from vrs_data import (
     parse_hltv_standings,
+    parse_hltv_match_roster,
+    parse_hltv_result_links,
     parse_hltv_team_detail,
     parse_standings,
     parse_team_detail,
@@ -99,6 +101,35 @@ Head to head matches
 | 25/07/26 | ![Image: DENDELE](https://example.com/c.png)DENDELE | ![Image: BLAST](https://example.com/d.png)BLAST Bounty | 100% | W | 9 |
 """
 
+HLTV_RESULTS = """Results for July 3rd 2026
+[FaZe 2 - 0 SINNERS XSE Pro League](https://www.hltv.org/matches/2395475/faze-vs-sinners-xse-pro-league-guangzhou-2026)
+Results for April 5th 2026
+[FaZe 1 - 2 BIG HLC](https://www.hltv.org/matches/2393066/faze-vs-big-hlc-belgrade-pro-2026)
+"""
+
+HLTV_PLAIN_MATCH = """Match stats
+Lineups
+FaZe
+World rank: #11
+
+karrigan
+
+broky
+
+Twistzz
+
+jcobbb
+
+frozen
+BIG
+World rank: #31
+tabseN
+JDC
+faveN
+blameF
+gr1ks
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_standings_parser(self):
@@ -140,8 +171,23 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(detail["matches"][0]["event"], "BLAST Bounty")
         self.assertEqual(len(detail["contributions"]), 3)
         result = simulate_roster(detail, ["frozen", "Twistzz", "Neityu"], ["a", "b", "c"])
-        self.assertEqual(result["indicative_score"], 400)
+        self.assertIsNone(result["indicative_score"])
+        self.assertFalse(result["simulation_complete"])
         self.assertTrue(result["event_groups"])
+
+    def test_unverified_history_never_claims_retained_points(self):
+        _, rows = parse_hltv_standings(HLTV_STANDINGS)
+        detail = parse_hltv_team_detail(HLTV_DETAIL, rows[0])
+        result = simulate_roster(detail, ["Neityu"], ["siuhy"])
+        self.assertTrue(all(row["status"] == "Unknown" for row in result["contribution_rows"]))
+        self.assertTrue(all(group["status"] == "Unknown" for group in result["event_groups"]))
+
+    def test_hltv_result_dates_and_plain_match_lineup(self):
+        links = parse_hltv_result_links(HLTV_RESULTS)
+        self.assertEqual(links[0]["date"], "2026-07-03")
+        _, rows = parse_hltv_standings(HLTV_STANDINGS)
+        roster = parse_hltv_match_roster(HLTV_PLAIN_MATCH, rows[0])
+        self.assertEqual(roster, ["karrigan", "broky", "Twistzz", "jcobbb", "frozen"])
 
     def test_three_of_five_threshold(self):
         detail = parse_team_detail(DETAIL)
