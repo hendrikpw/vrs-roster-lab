@@ -17,7 +17,7 @@ HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
 HLTV_INVITES_URL = "https://www.hltv.org/valve-ranking/invites"
 JINA_BASE = "https://r.jina.ai/"
 REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
-DATA_MODEL_VERSION = "timeline-invites-v1"
+DATA_MODEL_VERSION = "phase2-pro-tools-v1"
 
 
 class VRSDataError(RuntimeError):
