@@ -5,12 +5,11 @@ how Counter-Strike roster changes affect the inheritance of historical results.
 
 ## What it does
 
-- Loads Valve's latest published global VRS snapshot.
-- Shows the official starting value, head-to-head adjustment, ranking factors and
-  contributing matches for every available team.
+- Loads HLTV's daily live VRS Beta ranking and detailed point breakdown.
+- Shows LAN wins, opponent network, bounty and head-to-head points by match and event.
 - Applies Valve's public three-player roster-overlap rule to a simulated lineup.
-- Separates official scores from an explicitly labelled indicative reranking.
-- Falls back to a bundled FaZe demo if Valve's repository is temporarily unavailable.
+- Separates live scores from an explicitly labelled indicative roster-change estimate.
+- Uses Valve's official snapshot for historical-lineup enrichment and as a fallback.
 
 ## Run locally
 
@@ -28,9 +27,14 @@ streamlit run app.py
 3. Select the repository, branch and `app.py`.
 4. Deploy. No secrets are required for the current version.
 
-## Data note
+## Data sources
 
-Valve's published team detail files say that their event data is provided by HLTV.
-The current public detail format does not expose an event name for every match, so
-the MVP presents match and historical-core eligibility. A cached event-name
-enrichment layer can be added without changing the simulator model.
+- [HLTV Live VRS Beta](https://www.hltv.org/valve-ranking/teams) is the primary,
+  frequently updated source. It may include matches and secured prize money from
+  unfinished events.
+- [Valve's official VRS repository](https://github.com/ValveSoftware/counter-strike_regional_standings)
+  provides the official periodic snapshots and historical match lineups.
+
+The simulated score is an inheritance estimate, not an official reranking. A roster
+change can alter the global opponent network, top-ten selection and head-to-head
+calculation for every team.
