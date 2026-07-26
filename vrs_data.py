@@ -16,6 +16,7 @@ USER_AGENT = "VRS-Roster-Lab/0.1"
 HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
 JINA_BASE = "https://r.jina.ai/"
 REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
+DATA_MODEL_VERSION = "historical-lineups-v3"
 
 
 class VRSDataError(RuntimeError):
