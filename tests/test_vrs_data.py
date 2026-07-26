@@ -1,6 +1,7 @@
 import unittest
 
 from vrs_data import (
+    DATA_MODEL_VERSION,
     parse_hltv_standings,
     parse_hltv_match_roster,
     parse_hltv_result_links,
@@ -132,6 +133,9 @@ gr1ks
 
 
 class ParserTests(unittest.TestCase):
+    def test_data_model_version_busts_streamlit_cache(self):
+        self.assertEqual(DATA_MODEL_VERSION, "historical-lineups-v3")
+
     def test_standings_parser(self):
         rows = parse_standings(STANDINGS, "live/2026/standings_global_2026_07_06.md")
         self.assertEqual(rows[0]["team"], "FaZe")
