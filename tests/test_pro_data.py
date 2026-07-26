@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from pro_data import (
     compare_players,
+    load_active_map_pool,
     load_player_profile,
     load_team_map_data,
     opponent_rank_summary,
@@ -46,6 +47,33 @@ def team_fixture(name, strength_shift=0):
 
 
 class ProDataTests(unittest.TestCase):
+    def test_active_map_pool_uses_current_api_flags(self):
+        names = ["Ancient", "Anubis", "Cache", "Dust2", "Inferno", "Mirage", "Nuke"]
+        payload = {
+            "results": [
+                {
+                    "name": name,
+                    "map_name": f"de_{name.casefold()}",
+                    "discipline_id": 1,
+                    "map_pool": True,
+                }
+                for name in names
+            ]
+            + [
+                {
+                    "name": "Overpass",
+                    "map_name": "de_overpass",
+                    "discipline_id": 1,
+                    "map_pool": False,
+                }
+            ]
+        }
+        with patch("pro_data._get_json", return_value=payload):
+            pool = load_active_map_pool()
+        self.assertIn("Inferno", pool)
+        self.assertNotIn("Overpass", pool)
+        self.assertEqual(len(pool), 7)
+
     def test_player_profile_metrics(self):
         profile = {
             "nickname": "frozen",
@@ -190,10 +218,24 @@ class ProDataTests(unittest.TestCase):
     def test_veto_prediction_is_complete(self):
         alpha = team_fixture("Alpha", 1)
         beta = team_fixture("Beta", -1)
+        alpha["maps"].append(
+            {
+                "map": "Overpass",
+                "played": 30,
+                "wins": 0,
+                "losses": 30,
+                "win_rate": 0,
+                "picks": 0,
+                "bans": 30,
+                "deciders": 0,
+            }
+        )
         prediction = predict_veto(alpha, beta, 3)
         self.assertEqual(len(prediction["sequence"]), 7)
         self.assertEqual(len(prediction["played_maps"]), 3)
         self.assertEqual(len(set(row["map"] for row in prediction["sequence"])), 7)
+        self.assertIn("Inferno", prediction["active_map_pool"])
+        self.assertNotIn("Overpass", prediction["active_map_pool"])
         self.assertAlmostEqual(
             prediction["team_a_series_probability"]
             + prediction["team_b_series_probability"],
