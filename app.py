@@ -99,14 +99,19 @@ st.markdown(
     .metric-value { font: 600 31px/1.1 "Oswald", sans-serif; margin-top: 5px; }
     .green { color: var(--green); } .amber { color: var(--amber); } .red { color: var(--red); }
     .sim-panel {
-        border-left: 1px solid var(--line); padding: 16px 0 10px 26px; min-height: 680px;
+        border: 1px solid var(--line); border-top: 4px solid var(--red);
+        padding: 20px 22px; margin: 16px 0 18px;
+        background: rgba(255,255,255,.18);
     }
     .sim-panel h2 { font-size: 34px; margin: 0 0 4px; }
-    .panel-copy { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+    .panel-copy { color: var(--muted); font-size: 14px; }
     .impact {
-        margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line);
+        margin-top: 18px; padding: 18px 20px;
+        border: 1px solid var(--line); background: rgba(255,255,255,.18);
     }
     .impact-number { font: 700 58px/.95 "Oswald", sans-serif; color: var(--red); }
+    .impact-number.positive { color: var(--green); }
+    .impact-number.neutral { color: var(--ink); }
     .impact-label { color: var(--muted); font-size: 13px; margin-top: 4px; }
     .formula { font: 600 27px/1.1 "Oswald", sans-serif; margin-top: 13px; }
     .disclaimer {
@@ -129,7 +134,7 @@ st.markdown(
         .score { font-size: 54px; }
         .metric-grid { grid-template-columns: 1fr; }
         .metric-box { border-right: 0; border-bottom: 1px solid var(--line); }
-        .sim-panel { border-left: 0; border-top: 1px solid var(--line); padding: 22px 0 0; min-height: auto; }
+        .sim-panel { padding: 18px; margin-top: 12px; }
     }
     </style>
     """,
@@ -285,6 +290,7 @@ with analysis_tab:
             <div class="sim-panel">
               <h2>Simulate roster changes</h2>
               <div class="panel-copy">Select players who leave the current five-player roster.</div>
+            </div>
             """,
             unsafe_allow_html=True,
         )
@@ -313,10 +319,11 @@ with analysis_tab:
             if simulation["unknown_matches"]
             else ""
         )
+        impact_class = "positive" if delta is not None and delta > 0 else "neutral" if delta == 0 else ""
         st.markdown(
             f"""
               <div class="impact">
-                <div class="impact-number">{delta_text}</div>
+                <div class="impact-number {impact_class}">{delta_text}</div>
                 <div class="impact-label">indicative VRS change</div>
                 <div class="formula">{detail['final_score']:,.0f} → {score_text}</div>
                 <div class="impact-label">{simulation['lost_matches']} matches lost · {simulation['fragile_matches']} at the 3/5 threshold{unknown_text}</div>
@@ -325,7 +332,6 @@ with analysis_tab:
                 This is an inheritance estimate, not an official reranking. Exact VRS requires Valve's
                 full global network, top-ten selection and normalization to be recalculated.
               </div>
-            </div>
             """,
             unsafe_allow_html=True,
         )
