@@ -229,14 +229,24 @@ with analysis_tab:
         simulation = simulate_roster(detail, leaving, replacements)
 
         delta = simulation["indicative_delta"]
-        delta_text = f"{delta:+,.0f}"
+        delta_text = f"{delta:+,.0f}" if delta is not None else "N/A"
+        score_text = (
+            f"{simulation['indicative_score']:,.0f}"
+            if simulation["indicative_score"] is not None
+            else "N/A"
+        )
+        unknown_text = (
+            f" · {simulation['unknown_matches']} lineups unknown"
+            if simulation["unknown_matches"]
+            else ""
+        )
         st.markdown(
             f"""
               <div class="impact">
                 <div class="impact-number">{delta_text}</div>
                 <div class="impact-label">indicative VRS change</div>
-                <div class="formula">{detail['final_score']:,.0f} → {simulation['indicative_score']:,.0f}</div>
-                <div class="impact-label">{simulation['lost_matches']} matches lost · {simulation['fragile_matches']} at the 3/5 threshold</div>
+                <div class="formula">{detail['final_score']:,.0f} → {score_text}</div>
+                <div class="impact-label">{simulation['lost_matches']} matches lost · {simulation['fragile_matches']} at the 3/5 threshold{unknown_text}</div>
               </div>
               <div class="disclaimer">
                 This is an inheritance estimate, not an official reranking. Exact VRS requires Valve's
@@ -251,6 +261,15 @@ with analysis_tab:
         initials = "".join(part[0] for part in detail["team"].split()[:2]).upper()
         roster_html = "".join(
             f'<div class="player-chip">{html.escape(player)}</div>' for player in detail["roster"]
+        )
+        factor_ratio = simulation["factor_ratio"]
+        factor_ratio_text = f"{factor_ratio:.0%}" if factor_ratio is not None else "N/A"
+        factor_ratio_class = (
+            "green"
+            if factor_ratio is not None and factor_ratio >= .8
+            else "amber"
+            if factor_ratio is None or factor_ratio >= .5
+            else "red"
         )
         st.markdown(
             f"""
@@ -268,7 +287,7 @@ with analysis_tab:
               <div class="metric-grid">
                 <div class="metric-box"><div class="metric-label">Starting rank value</div><div class="metric-value">{detail['starting_score']:,.1f}</div></div>
                 <div class="metric-box"><div class="metric-label">Head-to-head adjustment</div><div class="metric-value {'green' if detail['h2h_total'] >= 0 else 'red'}">{detail['h2h_total']:+,.1f}</div></div>
-                <div class="metric-box"><div class="metric-label">Retained factor support</div><div class="metric-value {'green' if simulation['factor_ratio'] >= .8 else 'amber' if simulation['factor_ratio'] >= .5 else 'red'}">{simulation['factor_ratio']:.0%}</div></div>
+                <div class="metric-box"><div class="metric-label">Retained factor support</div><div class="metric-value {factor_ratio_class}">{factor_ratio_text}</div></div>
               </div>
             </div>
             """,
@@ -283,13 +302,21 @@ with analysis_tab:
             )
             events = pd.DataFrame(simulation["event_groups"])
             event_display = events[
-                ["event", "current_points", "retained_points", "lost_points", "status"]
+                [
+                    "event",
+                    "current_points",
+                    "retained_points",
+                    "lost_points",
+                    "unknown_points",
+                    "status",
+                ]
             ].rename(
                 columns={
                     "event": "Event",
                     "current_points": "Current points",
                     "retained_points": "Retained",
                     "lost_points": "Lost",
+                    "unknown_points": "Unverified",
                     "status": "Status",
                 }
             )
@@ -301,6 +328,7 @@ with analysis_tab:
                     "Current points": st.column_config.NumberColumn(format="%.0f"),
                     "Retained": st.column_config.NumberColumn(format="%.0f"),
                     "Lost": st.column_config.NumberColumn(format="%.0f"),
+                    "Unverified": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
 
@@ -312,7 +340,17 @@ with analysis_tab:
         )
         match_rows = pd.DataFrame(simulation["rows"])
         if not match_rows.empty:
-            match_rows["Core"] = match_rows["roster"].apply(lambda roster: " · ".join(roster))
+            match_rows["Core"] = match_rows.apply(
+                lambda row: (
+                    " · ".join(row["roster"])
+                    if row.get("roster_verified", bool(row["roster"]))
+                    else "Unverified historical lineup"
+                ),
+                axis=1,
+            )
+            match_rows["Core overlap"] = match_rows["overlap"].apply(
+                lambda value: f"{int(value)} / 5" if pd.notna(value) else "Unknown"
+            )
             match_rows["H2H"] = match_rows["h2h"].map(lambda value: f"{value:+.2f}")
             match_rows["Factor support"] = (
                 match_rows["bounty_adjusted"]
@@ -320,14 +358,22 @@ with analysis_tab:
                 + match_rows["lan_adjusted"]
             ).map(lambda value: f"{value:.3f}")
             display = match_rows[
-                ["date", "opponent", "event", "result", "Core", "overlap", "H2H", "status"]
+                [
+                    "date",
+                    "opponent",
+                    "event",
+                    "result",
+                    "Core",
+                    "Core overlap",
+                    "H2H",
+                    "status",
+                ]
             ].rename(
                 columns={
                     "date": "Date",
                     "opponent": "Opponent",
                     "event": "Event",
                     "result": "W/L",
-                    "overlap": "Core overlap",
                     "status": "Status",
                 }
             )
@@ -336,11 +382,6 @@ with analysis_tab:
                 width="stretch",
                 hide_index=True,
                 height=430,
-                column_config={
-                    "Core overlap": st.column_config.ProgressColumn(
-                        "Core overlap", min_value=0, max_value=5, format="%d / 5"
-                    )
-                },
             )
         else:
             st.info("No contributing matches were listed for this roster.")
@@ -416,7 +457,8 @@ with method_tab:
         secured prize money from unfinished events.
 
         **Official reference.** Valve's public Regional Standings repository remains the fallback and
-        is used to enrich older matches with their historical five-player lineups.
+        is used to enrich older matches with their historical five-player lineups. Newer events are
+        matched to the lineup shown on their HLTV match pages.
 
         **Roster identity.** Valve's model treats a past lineup as the same ranked entity when
         it shares at least **three players** with the newer lineup. The simulator applies that rule to
@@ -425,6 +467,10 @@ with method_tab:
         **Indicative score.** The live point rows allow a much closer inheritance estimate, grouped by
         event. It is still not an official reranking: changing a roster also changes the global opponent
         network, top-ten selection and head-to-head recalculation.
+
+        **Missing lineup safety.** A historical result is never assigned the current roster by default.
+        If neither source can verify its lineup, it is marked **Unknown** and no simulated score is shown
+        until the missing history can be resolved.
         """
     )
     link_left, link_right = st.columns(2)
