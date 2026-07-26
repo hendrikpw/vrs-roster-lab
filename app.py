@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
 from pro_data import (
+    CURRENT_POOL_EFFECTIVE_FROM,
     ProDataError,
     compare_players,
+    load_active_map_pool,
     load_player_profile,
     load_team_map_data,
     opponent_rank_summary,
@@ -177,8 +179,22 @@ def get_player_profile(query: str, days: int, data_model_version: str):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_team_map_profile(query: str, days: int, data_model_version: str):
-    return load_team_map_data(query, days)
+def get_team_map_profile(
+    query: str,
+    days: int,
+    start_date: str | None,
+    data_model_version: str,
+):
+    return load_team_map_data(
+        query,
+        days,
+        start_date=date.fromisoformat(start_date) if start_date else None,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_active_map_pool(data_model_version: str):
+    return load_active_map_pool()
 
 
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
@@ -1029,9 +1045,8 @@ with veto_tab:
     with veto_controls[2]:
         veto_window = st.selectbox(
             "Form",
-            [90, 180],
-            index=1,
-            format_func=lambda days: f"{days // 30} months",
+            ["Current pool era", "3 months", "6 months"],
+            index=0,
             key="veto_window",
         )
     with veto_controls[3]:
@@ -1052,18 +1067,38 @@ with veto_tab:
         st.warning("Choose two different teams.")
     elif run_veto:
         try:
+            veto_days = {"Current pool era": 180, "3 months": 90, "6 months": 180}[
+                veto_window
+            ]
+            veto_start_date = (
+                CURRENT_POOL_EFFECTIVE_FROM.isoformat()
+                if veto_window == "Current pool era"
+                else None
+            )
             with st.spinner("Loading recent maps and vetoes…"):
+                active_map_pool = get_active_map_pool(DATA_MODEL_VERSION)
                 team_a_data = get_team_map_profile(
-                    team_a_name, veto_window, DATA_MODEL_VERSION
+                    team_a_name,
+                    veto_days,
+                    veto_start_date,
+                    DATA_MODEL_VERSION,
                 )
                 team_b_data = get_team_map_profile(
-                    team_b_name, veto_window, DATA_MODEL_VERSION
+                    team_b_name,
+                    veto_days,
+                    veto_start_date,
+                    DATA_MODEL_VERSION,
                 )
             st.session_state["veto_result"] = {
                 "key": (team_a_name, team_b_name, veto_window, best_of),
                 "team_a": team_a_data,
                 "team_b": team_b_data,
-                "prediction": predict_veto(team_a_data, team_b_data, best_of),
+                "prediction": predict_veto(
+                    team_a_data,
+                    team_b_data,
+                    best_of,
+                    active_map_pool,
+                ),
             }
         except ProDataError as exc:
             st.warning(str(exc))
@@ -1077,6 +1112,11 @@ with veto_tab:
         team_a_data = stored_veto["team_a"]
         team_b_data = stored_veto["team_b"]
         veto_prediction = stored_veto["prediction"]
+        st.caption(
+            "Current Active Duty pool: "
+            + " · ".join(veto_prediction["active_map_pool"])
+            + f" · form since {team_a_data['period_start']}"
+        )
         a_strength = opponent_rank_summary(team_a_data, standings)
         b_strength = opponent_rank_summary(team_b_data, standings)
         veto_metrics = st.columns(6)
@@ -1265,7 +1305,8 @@ with method_tab:
 
         **Map veto.** The suggested BO3/BO5 veto uses recent team-owned picks and bans, map results,
         smoothed win rates and series form. It cannot account for private preparation, stand-ins or
-        event-specific tactics, and its probabilities are not betting odds.
+        event-specific tactics, and its probabilities are not betting odds. The seven-map Active Duty
+        pool is loaded dynamically; the default form window begins with the current pool change.
 
         **Missing lineup safety.** A historical result is never assigned the current roster by default.
         If neither source can verify its lineup, it is marked **Unknown** and no simulated score is shown
