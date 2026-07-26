@@ -25,6 +25,8 @@ how Counter-Strike roster changes affect the inheritance of historical results.
 - Places the candidate's sporting profile beside the modeled VRS inheritance cost.
 - Builds BO3 and BO5 veto suggestions from recent map results plus team-owned picks
   and bans, with smoothed map and series probabilities.
+- Loads the current seven-map Active Duty pool dynamically and defaults veto form to
+  the current map-pool era, so rotated-out maps cannot enter a prediction.
 
 ## Run locally
 
