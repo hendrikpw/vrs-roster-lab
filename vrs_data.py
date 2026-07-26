@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -12,6 +12,9 @@ REPO = "ValveSoftware/counter-strike_regional_standings"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/main/"
 API_BASE = f"https://api.github.com/repos/{REPO}/contents/"
 USER_AGENT = "VRS-Roster-Lab/0.1"
+HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
+JINA_BASE = "https://r.jina.ai/"
+REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
 
 
 class VRSDataError(RuntimeError):
@@ -24,7 +27,7 @@ def _get_text(url: str, timeout: int = 20) -> str:
         with urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8")
     except (HTTPError, URLError, TimeoutError) as exc:
-        raise VRSDataError(f"Could not load Valve ranking data: {exc}") from exc
+        raise VRSDataError(f"Could not load ranking data: {exc}") from exc
 
 
 def _get_json(url: str, timeout: int = 20) -> Any:
@@ -50,9 +53,234 @@ def _adjusted_value(value: str) -> float:
     return _float(match.group(1)) if match else 0.0
 
 
+def _clean_markdown_label(value: str) -> str:
+    value = re.sub(r"!\[[^\]]*]\([^)]*\)", "", value)
+    value = re.sub(r"\[([^\]]+)]\([^)]*\)", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _field(markdown: str, label: str, default: str = "") -> str:
     match = re.search(rf"^{re.escape(label)}:\s*(.+?)(?:<br\s*/?>)?$", markdown, re.MULTILINE)
-    return match.group(1).strip() if match else default
+    return _clean_markdown_label(match.group(1)) if match else default
+
+
+def _iso_hltv_date(value: str) -> str:
+    try:
+        return datetime.strptime(value.strip(), "%d/%m/%y").date().isoformat()
+    except ValueError:
+        return value.strip()
+
+
+def parse_hltv_standings(markdown: str) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    date_match = re.search(
+        r"Valve global ranking on ([A-Za-z]+) (\d+)(?:st|nd|rd|th), (\d{4})",
+        markdown,
+    )
+    if not date_match:
+        raise VRSDataError("HLTV's live VRS date could not be read.")
+    snapshot_date = datetime.strptime(
+        f"{date_match.group(1)} {date_match.group(2)} {date_match.group(3)}", "%B %d %Y"
+    ).date().strftime("%Y_%m_%d")
+
+    markers = list(re.finditer(r"^#(\d+)!\[Image", markdown, re.MULTILINE))
+    rows: list[dict[str, Any]] = []
+    regional_counts: dict[str, int] = {}
+    for index, marker in enumerate(markers):
+        block_end = markers[index + 1].start() if index + 1 < len(markers) else len(markdown)
+        block = markdown[marker.start():block_end]
+        team_match = re.search(
+            r"^(.+?)\((\d+) Valve points\)(EU|AM|AS)$", block, re.MULTILINE
+        )
+        detail_match = re.search(r"\[Ranking details]\((https://www\.hltv\.org/[^)]+)\)", block)
+        team_url_match = re.search(r"\[HLTV Team profile]\((https://www\.hltv\.org/[^)]+)\)", block)
+        if not team_match or not detail_match:
+            continue
+
+        after_team = block[team_match.end():].splitlines()
+        roster: list[str] = []
+        for line in after_team:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("[") or line.startswith("!["):
+                break
+            roster.append(_clean_markdown_label(line))
+            if len(roster) == 5:
+                break
+        if len(roster) != 5:
+            continue
+
+        region_code = team_match.group(3)
+        regional_counts[region_code] = regional_counts.get(region_code, 0) + 1
+        rows.append(
+            {
+                "rank": int(marker.group(1)),
+                "points": int(team_match.group(2)),
+                "team": team_match.group(1).strip(),
+                "roster": roster,
+                "snapshot_date": snapshot_date,
+                "region": REGION_NAMES[region_code],
+                "regional_rank": regional_counts[region_code],
+                "detail_path": "",
+                "detail_url": detail_match.group(1).replace("&amp;", "&"),
+                "team_url": team_url_match.group(1) if team_url_match else "",
+                "source": "HLTV Live VRS (Beta)",
+            }
+        )
+    if not rows:
+        raise VRSDataError("HLTV's live VRS page did not contain any ranking rows.")
+    return {
+        "date": snapshot_date,
+        "path": HLTV_LIVE_URL,
+        "source": "HLTV Live VRS (Beta)",
+    }, rows
+
+
+def load_hltv_live_standings() -> tuple[dict[str, str], list[dict[str, Any]]]:
+    return parse_hltv_standings(_get_text(f"{JINA_BASE}{HLTV_LIVE_URL}", timeout=30))
+
+
+def _next_points(lines: list[str], label: str) -> float:
+    for index, line in enumerate(lines):
+        if line.strip().startswith(label):
+            for candidate in lines[index + 1:index + 5]:
+                match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*p\s*", candidate)
+                if match:
+                    return _float(match.group(1))
+    return 0.0
+
+
+def parse_hltv_team_detail(markdown: str, team_row: dict[str, Any]) -> dict[str, Any]:
+    lines = markdown.splitlines()
+    factors = {
+        "LAN Wins": _next_points(lines, "LAN wins"),
+        "Opponent Network": _next_points(lines, "Opponent network"),
+        "Bounty Offered": _next_points(lines, "Bounty offered"),
+        "Bounty Collected": _next_points(lines, "Bounty collected"),
+        "Head To Head": _next_points(lines, "Head to head"),
+    }
+    if not any(factors.values()):
+        raise VRSDataError("HLTV's VRS point breakdown could not be read.")
+
+    section_names = {
+        "Most recent LAN wins": "LAN Wins",
+        "Opponent network, 10 best wins": "Opponent Network",
+        "Bounty offered, 10 best prize winnings": "Bounty Offered",
+        "Bounty collected, 10 best wins": "Bounty Collected",
+        "Head to head matches": "Head To Head",
+    }
+    current_section = ""
+    contributions: list[dict[str, Any]] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in section_names:
+            current_section = section_names[stripped]
+            continue
+        if not current_section or not stripped.startswith("|"):
+            continue
+        cells = _cells(stripped)
+        if not cells or cells[0] == "Date" or set(cells[0]) <= {"-", ":"}:
+            continue
+        if not re.fullmatch(r"\d{2}/\d{2}/\d{2}", cells[0]):
+            continue
+
+        if current_section == "Bounty Offered":
+            if len(cells) < 5:
+                continue
+            opponent, event, result = "", _clean_markdown_label(cells[1]), ""
+        else:
+            if len(cells) < 5:
+                continue
+            opponent = _clean_markdown_label(cells[1])
+            event = _clean_markdown_label(cells[2])
+            result = cells[-2].strip() if current_section == "Head To Head" else ""
+        contributions.append(
+            {
+                "date": _iso_hltv_date(cells[0]),
+                "opponent": opponent,
+                "event": event,
+                "component": current_section,
+                "points": _float(cells[-1]),
+                "result": result,
+                "roster": list(team_row["roster"]),
+            }
+        )
+
+    h2h_matches = [
+        {
+            "match_number": index + 1,
+            "match_id": 0,
+            "date": row["date"],
+            "opponent": row["opponent"],
+            "event": row["event"],
+            "result": row["result"],
+            "age_weight": 0.0,
+            "event_weight": 0.0,
+            "bounty_adjusted": 0.0,
+            "network_adjusted": 0.0,
+            "lan_adjusted": 0.0,
+            "h2h": row["points"],
+            "roster": list(team_row["roster"]),
+        }
+        for index, row in enumerate(contributions)
+        if row["component"] == "Head To Head"
+    ]
+    return {
+        "team": team_row["team"],
+        "roster": list(team_row["roster"]),
+        "global_rank": team_row["rank"],
+        "region": team_row["region"],
+        "regional_rank": team_row["regional_rank"],
+        "final_score": float(team_row["points"]),
+        "starting_score": 400.0 + sum(
+            value for name, value in factors.items() if name != "Head To Head"
+        ),
+        "h2h_total": factors["Head To Head"],
+        "factors": factors,
+        "matches": h2h_matches,
+        "contributions": contributions,
+        "prizes": [],
+        "source": "HLTV Live VRS (Beta)",
+        "detail_url": team_row["detail_url"],
+    }
+
+
+def _enrich_historical_rosters(
+    detail: dict[str, Any], official_detail: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not official_detail or not official_detail.get("matches"):
+        return detail
+    official_matches = official_detail["matches"]
+    exact = {
+        (match["date"], _clean_markdown_label(match["opponent"]).casefold()): match["roster"]
+        for match in official_matches
+    }
+    latest_official_date = max(match["date"] for match in official_matches)
+
+    def roster_for(row: dict[str, Any]) -> list[str]:
+        key = (row["date"], _clean_markdown_label(row.get("opponent", "")).casefold())
+        if key in exact:
+            return list(exact[key])
+        if row["date"] > latest_official_date:
+            return list(detail["roster"])
+        prior = [match for match in official_matches if match["date"] <= row["date"]]
+        return list(max(prior, key=lambda match: match["date"])["roster"]) if prior else list(detail["roster"])
+
+    for row in detail["contributions"]:
+        row["roster"] = roster_for(row)
+    for row in detail["matches"]:
+        row["roster"] = roster_for(row)
+    return detail
+
+
+def load_hltv_team_detail(
+    team_row: dict[str, Any], official_detail: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    detail_url = team_row.get("detail_url", "")
+    if not detail_url.startswith("https://www.hltv.org/valve-ranking/teams/details/"):
+        raise VRSDataError("Unexpected HLTV detail URL.")
+    markdown = _get_text(f"{JINA_BASE}{detail_url}", timeout=30)
+    return _enrich_historical_rosters(parse_hltv_team_detail(markdown, team_row), official_detail)
 
 
 def discover_latest_snapshot(reference_date: date | None = None) -> dict[str, str]:
@@ -226,15 +454,88 @@ def simulate_roster(
             retained_h2h += match["h2h"]
         rows.append({**match, "overlap": overlap, "eligible": eligible, "status": status})
 
-    all_eligible = bool(rows) and all(row["eligible"] for row in rows)
-    factor_ratio = (
-        retained_factor_support / total_factor_support if total_factor_support > 0 else 1.0
-    )
-    if all_eligible:
-        indicative_score = detail["final_score"]
+    contribution_rows: list[dict[str, Any]] = []
+    event_groups: dict[str, dict[str, Any]] = {}
+    if detail.get("contributions"):
+        for contribution in detail["contributions"]:
+            historical_keys = {normalize_player(name) for name in contribution["roster"]}
+            overlap = len(simulated_keys & historical_keys)
+            eligible = overlap >= 3
+            status = "Retained" if overlap >= 4 else "At risk" if overlap == 3 else "Lost"
+            row = {**contribution, "overlap": overlap, "eligible": eligible, "status": status}
+            contribution_rows.append(row)
+            event = contribution["event"] or "Other"
+            group = event_groups.setdefault(
+                event,
+                {
+                    "event": event,
+                    "current_points": 0.0,
+                    "retained_points": 0.0,
+                    "lost_points": 0.0,
+                    "rows": 0,
+                    "eligible_rows": 0,
+                },
+            )
+            group["current_points"] += contribution["points"]
+            group["rows"] += 1
+            if eligible:
+                group["retained_points"] += contribution["points"]
+                group["eligible_rows"] += 1
+            else:
+                group["lost_points"] += contribution["points"]
+
+        retained_components: dict[str, float] = {}
+        for component, headline_points in detail["factors"].items():
+            component_rows = [
+                row for row in contribution_rows if row["component"] == component
+            ]
+            if component == "Head To Head":
+                retained_components[component] = (
+                    headline_points
+                    if component_rows and all(row["eligible"] for row in component_rows)
+                    else sum(row["points"] for row in component_rows if row["eligible"])
+                )
+            else:
+                listed_total = sum(row["points"] for row in component_rows)
+                listed_retained = sum(
+                    row["points"] for row in component_rows if row["eligible"]
+                )
+                retained_components[component] = (
+                    headline_points * listed_retained / listed_total if listed_total else 0.0
+                )
+        positive_total = sum(
+            value for name, value in detail["factors"].items() if name != "Head To Head"
+        )
+        positive_retained = sum(
+            value for name, value in retained_components.items() if name != "Head To Head"
+        )
+        factor_ratio = positive_retained / positive_total if positive_total else 1.0
+        all_eligible = bool(contribution_rows) and all(
+            row["eligible"] for row in contribution_rows
+        )
+        indicative_score = (
+            detail["final_score"]
+            if all_eligible
+            else max(400.0, 400.0 + sum(retained_components.values()))
+        )
+        for group in event_groups.values():
+            group["status"] = (
+                "Retained"
+                if group["eligible_rows"] == group["rows"]
+                else "Lost"
+                if group["eligible_rows"] == 0
+                else "Partial"
+            )
     else:
-        indicative_start = 400 + max(0.0, detail["starting_score"] - 400) * factor_ratio
-        indicative_score = max(400.0, indicative_start + retained_h2h)
+        all_eligible = bool(rows) and all(row["eligible"] for row in rows)
+        factor_ratio = (
+            retained_factor_support / total_factor_support if total_factor_support > 0 else 1.0
+        )
+        if all_eligible:
+            indicative_score = detail["final_score"]
+        else:
+            indicative_start = 400 + max(0.0, detail["starting_score"] - 400) * factor_ratio
+            indicative_score = max(400.0, indicative_start + retained_h2h)
 
     core_groups: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -255,6 +556,10 @@ def simulate_roster(
         "simulated_roster": simulated_roster,
         "retained_players": retained,
         "rows": rows,
+        "contribution_rows": contribution_rows,
+        "event_groups": sorted(
+            event_groups.values(), key=lambda row: row["current_points"], reverse=True
+        ),
         "core_groups": list(core_groups.values()),
         "retained_matches": sum(row["eligible"] for row in rows),
         "lost_matches": sum(not row["eligible"] for row in rows),
