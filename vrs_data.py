@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -14,9 +14,10 @@ RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/main/"
 API_BASE = f"https://api.github.com/repos/{REPO}/contents/"
 USER_AGENT = "VRS-Roster-Lab/0.1"
 HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
+HLTV_INVITES_URL = "https://www.hltv.org/valve-ranking/invites"
 JINA_BASE = "https://r.jina.ai/"
 REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
-DATA_MODEL_VERSION = "historical-lineups-v3"
+DATA_MODEL_VERSION = "timeline-invites-v1"
 
 
 class VRSDataError(RuntimeError):
@@ -138,6 +139,192 @@ def parse_hltv_standings(markdown: str) -> tuple[dict[str, str], list[dict[str, 
     }, rows
 
 
+def parse_hltv_invites(
+    markdown: str, reference_date: date | None = None
+) -> list[dict[str, Any]]:
+    """Parse HLTV's upcoming VRS invite cards."""
+    reference_date = reference_date or date.today()
+    section = markdown.split("# Upcoming Events with VRS invite", 1)[-1]
+    targets = list(
+        re.finditer(
+            r"\(https://www\.hltv\.org/valve-ranking/teams/event/(\d+)\)",
+            section,
+        )
+    )
+    events: list[dict[str, Any]] = []
+    previous_end = 0
+    for target in targets:
+        segment = section[previous_end:target.start()]
+        previous_end = target.end()
+        label = _clean_markdown_label(segment).strip(" []")
+        label = re.sub(r"\s+", " ", label)
+        if "[" in label:
+            label = label.rsplit("[", 1)[-1].strip()
+        date_match = re.search(
+            r"([A-Z][a-z]+) (\d+)(?:st|nd|rd|th) Invite date", label
+        )
+        if not date_match:
+            continue
+        month = datetime.strptime(date_match.group(1), "%b").month
+        day = int(date_match.group(2))
+        invite_date = date(reference_date.year, month, day)
+        if invite_date < reference_date:
+            invite_date = date(reference_date.year + 1, month, day)
+
+        no_invites = "No invites yet" in label
+        total_match = re.search(r"(\d+) Invites", label)
+        name_end = (
+            label.find("No invites yet")
+            if no_invites
+            else total_match.start()
+            if total_match
+            else date_match.start()
+        )
+        name = label[:name_end].strip(" -")
+        allocation_text = (
+            label[total_match.end():date_match.start()] if total_match else ""
+        )
+        allocations = {
+            region: int(value)
+            for value, region in re.findall(r"(\d+) (Global|EU|AM|AS)", allocation_text)
+        }
+        event_id = target.group(1)
+        events.append(
+            {
+                "event_id": event_id,
+                "name": name,
+                "invite_date": invite_date.isoformat(),
+                "total_invites": int(total_match.group(1)) if total_match else None,
+                "allocations": allocations,
+                "event_url": (
+                    f"https://www.hltv.org/valve-ranking/teams/event/{event_id}"
+                ),
+                "status": "No invites yet" if no_invites else "Prediction available",
+            }
+        )
+    return events
+
+
+def load_hltv_invites() -> list[dict[str, Any]]:
+    events = parse_hltv_invites(
+        _get_text(f"{JINA_BASE}{HLTV_INVITES_URL}", timeout=30)
+    )
+    if not events:
+        raise VRSDataError("HLTV's upcoming VRS invite list could not be read.")
+    return events
+
+
+def parse_hltv_invite_ranking(
+    markdown: str, event: dict[str, Any]
+) -> dict[str, Any]:
+    """Parse one of HLTV's predicted event-invite ranking pages."""
+    header_match = re.search(
+        r"^(.+?) ranking on ([A-Za-z]+) (\d+)(?:st|nd|rd|th), (\d{4})",
+        markdown,
+        re.MULTILINE,
+    )
+    if not header_match:
+        raise VRSDataError("HLTV's invite prediction date could not be read.")
+    ranking_date = datetime.strptime(
+        f"{header_match.group(2)} {header_match.group(3)} {header_match.group(4)}",
+        "%B %d %Y",
+    ).date()
+    markers = list(re.finditer(r"^#(\d+)!\[Image", markdown, re.MULTILINE))
+    section_markers = list(
+        re.finditer(r"^(Global|Europe|Americas?|Asia)$", markdown, re.MULTILINE)
+    )
+    cutoff_markers = list(
+        re.finditer(r"^\s*Not qualified\s*$", markdown, re.MULTILINE)
+    )
+    rows: list[dict[str, Any]] = []
+    regional_counts: dict[str, int] = {}
+    for index, marker in enumerate(markers):
+        block_end = markers[index + 1].start() if index + 1 < len(markers) else len(markdown)
+        block = markdown[marker.start():block_end]
+        team_match = re.search(
+            r"^(.+?)\((\d+) Valve points\)(EU|AM|AS)$", block, re.MULTILINE
+        )
+        if not team_match:
+            continue
+        roster: list[str] = []
+        for line in block[team_match.end():].splitlines():
+            cleaned = _clean_markdown_label(line.strip())
+            if not cleaned:
+                continue
+            if line.strip().startswith("[") or line.strip().startswith("!["):
+                break
+            roster.append(cleaned)
+            if len(roster) == 5:
+                break
+        region_code = team_match.group(3)
+        regional_counts[region_code] = regional_counts.get(region_code, 0) + 1
+        section = next(
+            (
+                heading
+                for heading in reversed(section_markers)
+                if heading.start() < marker.start()
+            ),
+            None,
+        )
+        track = section.group(1) if section else "Global"
+        last_cutoff = max(
+            (
+                cutoff.start()
+                for cutoff in cutoff_markers
+                if cutoff.start() < marker.start()
+            ),
+            default=-1,
+        )
+        qualified = section is None or section.start() > last_cutoff
+        rows.append(
+            {
+                "rank": int(marker.group(1)),
+                "team": team_match.group(1).strip(),
+                "points": int(team_match.group(2)),
+                "region": REGION_NAMES[region_code],
+                "regional_rank": regional_counts[region_code],
+                "roster": roster,
+                "track": track,
+                "qualified": qualified,
+                "status": "Invited" if qualified else "Outside",
+            }
+        )
+    if not rows:
+        raise VRSDataError("HLTV's invite prediction did not contain ranking rows.")
+    tracks: dict[str, dict[str, Any]] = {}
+    for track in dict.fromkeys(row["track"] for row in rows):
+        track_rows = [row for row in rows if row["track"] == track]
+        qualified_rows = [row for row in track_rows if row["qualified"]]
+        outside_rows = [row for row in track_rows if not row["qualified"]]
+        tracks[track] = {
+            "rows": track_rows,
+            "cutoff": qualified_rows[-1] if qualified_rows else None,
+            "first_out": outside_rows[0] if outside_rows else None,
+        }
+    primary_track = "Global" if "Global" in tracks else next(iter(tracks))
+    return {
+        **event,
+        "full_name": header_match.group(1).strip(),
+        "ranking_date": ranking_date.isoformat(),
+        "rows": rows,
+        "tracks": tracks,
+        "cutoff": tracks[primary_track]["cutoff"],
+        "first_out": tracks[primary_track]["first_out"],
+        "source": "HLTV VRS invite prediction",
+    }
+
+
+def load_hltv_invite_ranking(event: dict[str, Any]) -> dict[str, Any]:
+    event_url = event.get("event_url", "")
+    if not re.fullmatch(
+        r"https://www\.hltv\.org/valve-ranking/teams/event/\d+", event_url
+    ):
+        raise VRSDataError("Unexpected HLTV invite event URL.")
+    return parse_hltv_invite_ranking(
+        _get_text(f"{JINA_BASE}{event_url}", timeout=30), event
+    )
+
+
 def load_hltv_live_standings() -> tuple[dict[str, str], list[dict[str, Any]]]:
     return parse_hltv_standings(_get_text(f"{JINA_BASE}{HLTV_LIVE_URL}", timeout=30))
 
@@ -234,6 +421,7 @@ def parse_hltv_team_detail(markdown: str, team_row: dict[str, Any]) -> dict[str,
     return {
         "team": team_row["team"],
         "roster": list(team_row["roster"]),
+        "snapshot_date": team_row["snapshot_date"],
         "global_rank": team_row["rank"],
         "region": team_row["region"],
         "regional_rank": team_row["regional_rank"],
@@ -674,6 +862,213 @@ def load_team_detail(detail_url: str) -> dict[str, Any]:
 
 def normalize_player(name: str) -> str:
     return re.sub(r"\s+", "", name).casefold()
+
+
+def recency_weight(result_date: date, ranking_date: date) -> float:
+    """Valve VRS recency: full weight for 30 days, then linear decay to day 183."""
+    age_days = max(0, (ranking_date - result_date).days)
+    if age_days <= 30:
+        return 1.0
+    if age_days >= 183:
+        return 0.0
+    return (183 - age_days) / (183 - 30)
+
+
+def project_vrs(
+    detail: dict[str, Any],
+    ranking_date: date,
+    leaving: list[str] | None = None,
+    replacements: list[str] | None = None,
+) -> dict[str, Any]:
+    """Project listed contributions forward assuming the team plays no new matches."""
+    leaving = leaving or []
+    replacements = [name.strip() for name in (replacements or []) if name.strip()]
+    contributions = detail.get("contributions", [])
+    snapshot_value = detail.get("snapshot_date", date.today().isoformat())
+    try:
+        snapshot_date = datetime.strptime(
+            snapshot_value.replace("_", "-"), "%Y-%m-%d"
+        ).date()
+    except (ValueError, AttributeError):
+        snapshot_date = date.today()
+    ranking_date = max(ranking_date, snapshot_date)
+
+    leaving_keys = {normalize_player(name) for name in leaving}
+    retained = [
+        player
+        for player in detail["roster"]
+        if normalize_player(player) not in leaving_keys
+    ]
+    simulated_roster = retained + replacements
+    simulated_keys = {normalize_player(player) for player in simulated_roster}
+    changes_requested = bool(leaving or replacements)
+
+    listed_totals: dict[str, float] = {}
+    for row in contributions:
+        listed_totals[row["component"]] = (
+            listed_totals.get(row["component"], 0.0) + row["points"]
+        )
+    component_scales = {
+        component: (
+            headline / listed_totals.get(component, 0.0)
+            if listed_totals.get(component, 0.0)
+            else 0.0
+        )
+        for component, headline in detail.get("factors", {}).items()
+    }
+
+    events: dict[str, dict[str, Any]] = {}
+    baseline_total = 0.0
+    simulated_total = 0.0
+    unknown_rows = 0
+    for row in contributions:
+        try:
+            result_date = date.fromisoformat(row["date"])
+        except (ValueError, TypeError):
+            continue
+        current_weight = recency_weight(result_date, snapshot_date)
+        future_weight = recency_weight(result_date, ranking_date)
+        decay_ratio = future_weight / current_weight if current_weight > 0 else 0.0
+        scaled_current = row["points"] * component_scales.get(row["component"], 0.0)
+        baseline_points = scaled_current * decay_ratio
+
+        verified = row.get("roster_verified", bool(row.get("roster")))
+        if not changes_requested:
+            eligible = True
+            overlap = 5
+        elif verified:
+            historical = {normalize_player(player) for player in row["roster"]}
+            overlap = len(simulated_keys & historical)
+            eligible = overlap >= 3
+        else:
+            overlap = None
+            eligible = None
+            unknown_rows += 1
+        simulated_points = baseline_points if eligible is True else 0.0
+        baseline_total += baseline_points
+        if eligible is True:
+            simulated_total += simulated_points
+
+        event_name = row.get("event") or "Other"
+        group = events.setdefault(
+            event_name,
+            {
+                "event": event_name,
+                "current_points": 0.0,
+                "baseline_points": 0.0,
+                "simulated_points": 0.0,
+                "unknown_rows": 0,
+                "lost_rows": 0,
+            },
+        )
+        group["current_points"] += scaled_current
+        group["baseline_points"] += baseline_points
+        if eligible is True:
+            group["simulated_points"] += simulated_points
+        elif eligible is False:
+            group["lost_rows"] += 1
+        else:
+            group["unknown_rows"] += 1
+
+    for component, headline_points in detail.get("factors", {}).items():
+        if listed_totals.get(component, 0.0):
+            continue
+        # A component can be present in HLTV's headline without its underlying
+        # table being available. Preserve it at the snapshot and expose the
+        # missing attribution rather than silently dropping those points.
+        future_weight = recency_weight(snapshot_date, ranking_date)
+        baseline_points = headline_points * future_weight
+        baseline_total += baseline_points
+        eligible = not changes_requested
+        if eligible:
+            simulated_total += baseline_points
+        else:
+            unknown_rows += 1
+        group = events.setdefault(
+            f"{component} · unlisted balance",
+            {
+                "event": f"{component} · unlisted balance",
+                "current_points": 0.0,
+                "baseline_points": 0.0,
+                "simulated_points": 0.0,
+                "unknown_rows": 0,
+                "lost_rows": 0,
+            },
+        )
+        group["current_points"] += headline_points
+        group["baseline_points"] += baseline_points
+        if eligible:
+            group["simulated_points"] += baseline_points
+        else:
+            group["unknown_rows"] += 1
+
+    projection_complete = bool(contributions) and (not changes_requested or unknown_rows == 0)
+    baseline_score = max(400.0, 400.0 + baseline_total)
+    simulated_score = (
+        max(400.0, 400.0 + simulated_total) if projection_complete else None
+    )
+    event_rows: list[dict[str, Any]] = []
+    for group in events.values():
+        group["roster_delta"] = (
+            group["simulated_points"] - group["baseline_points"]
+            if projection_complete
+            else None
+        )
+        group["status"] = (
+            "Unknown"
+            if group["unknown_rows"]
+            else "Affected"
+            if group["lost_rows"]
+            else "Retained"
+        )
+        event_rows.append(group)
+    return {
+        "ranking_date": ranking_date.isoformat(),
+        "snapshot_date": snapshot_date.isoformat(),
+        "simulated_roster": simulated_roster,
+        "baseline_score": baseline_score,
+        "projected_score": simulated_score,
+        "decay_delta": baseline_score - detail["final_score"],
+        "roster_delta": (
+            simulated_score - baseline_score if simulated_score is not None else None
+        ),
+        "event_groups": sorted(
+            event_rows, key=lambda row: abs(row["current_points"]), reverse=True
+        ),
+        "unknown_rows": unknown_rows,
+        "projection_complete": projection_complete,
+    }
+
+
+def build_vrs_timeline(
+    detail: dict[str, Any],
+    leaving: list[str] | None = None,
+    replacements: list[str] | None = None,
+    weeks: int = 26,
+) -> dict[str, Any]:
+    snapshot_value = detail.get("snapshot_date", date.today().isoformat())
+    snapshot_date = datetime.strptime(
+        snapshot_value.replace("_", "-"), "%Y-%m-%d"
+    ).date()
+    rows: list[dict[str, Any]] = []
+    for week in range(max(0, weeks) + 1):
+        target = snapshot_date + timedelta(days=7 * week)
+        projection = project_vrs(detail, target, leaving, replacements)
+        rows.append(
+            {
+                "date": target.isoformat(),
+                "baseline_score": projection["baseline_score"],
+                "projected_score": projection["projected_score"],
+                "roster_delta": projection["roster_delta"],
+            }
+        )
+    complete_rows = [row for row in rows if row["roster_delta"] is not None]
+    best_window = (
+        max(complete_rows, key=lambda row: row["roster_delta"])
+        if complete_rows
+        else None
+    )
+    return {"rows": rows, "best_window": best_window}
 
 
 def simulate_roster(
