@@ -717,6 +717,7 @@ def simulate_roster(
 
     contribution_rows: list[dict[str, Any]] = []
     event_groups: dict[str, dict[str, Any]] = {}
+    component_breakdown: list[dict[str, Any]] = []
     if detail.get("contributions"):
         for contribution in detail["contributions"]:
             verified = contribution.get("roster_verified", bool(contribution["roster"]))
@@ -799,6 +800,32 @@ def simulate_roster(
             factor_ratio = None
         else:
             indicative_score = max(400.0, 400.0 + sum(retained_components.values()))
+        component_breakdown = [
+            {
+                "component": "Base value",
+                "current": 400.0,
+                "simulated": 400.0,
+                "change": 0.0,
+            }
+        ]
+        for component, current_points in detail["factors"].items():
+            simulated_points = (
+                retained_components.get(component, 0.0)
+                if simulation_complete
+                else None
+            )
+            component_breakdown.append(
+                {
+                    "component": component,
+                    "current": current_points,
+                    "simulated": simulated_points,
+                    "change": (
+                        simulated_points - current_points
+                        if simulated_points is not None
+                        else None
+                    ),
+                }
+            )
         for group in event_groups.values():
             group["status"] = (
                 "Unknown"
@@ -847,6 +874,7 @@ def simulate_roster(
         "event_groups": sorted(
             event_groups.values(), key=lambda row: row["current_points"], reverse=True
         ),
+        "component_breakdown": component_breakdown,
         "core_groups": list(core_groups.values()),
         "retained_matches": sum(row["eligible"] is True for row in rows),
         "lost_matches": sum(row["eligible"] is False for row in rows),
