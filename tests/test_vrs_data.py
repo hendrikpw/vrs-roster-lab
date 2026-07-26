@@ -1,13 +1,19 @@
 import unittest
+from datetime import date
 
 from vrs_data import (
     DATA_MODEL_VERSION,
+    build_vrs_timeline,
+    parse_hltv_invite_ranking,
+    parse_hltv_invites,
     parse_hltv_standings,
     parse_hltv_match_roster,
     parse_hltv_result_links,
     parse_hltv_team_detail,
     parse_standings,
     parse_team_detail,
+    project_vrs,
+    recency_weight,
     simulate_roster,
 )
 
@@ -131,10 +137,64 @@ blameF
 gr1ks
 """
 
+HLTV_INVITES = """# Upcoming Events with VRS invite
+[![Image](https://example.com/epl.png) EPL S24 12 Invites 12 Global VRS Invites Aug 3rd Invite date](https://www.hltv.org/valve-ranking/teams/event/8244)
+[![Image](https://example.com/iem.png) IEM Beijing 29 Invites 22 Global 2 AM 5 AS VRS Invites Aug 3rd Invite date](https://www.hltv.org/valve-ranking/teams/event/8245)
+"""
+
+HLTV_INVITE_RANKING = """ESL Pro League Season 24 ranking on August 3rd, 2026
+
+Global
+
+#1![Image: Spirit](https://example.com/spirit.png)
+
+Spirit(2020 Valve points)EU
+
+donk
+
+sh1ro
+
+zont1x
+
+chopper
+
+magixx
+
+#2![Image: G2](https://example.com/g2.png)
+
+G2(1900 Valve points)EU
+
+huNter-
+
+malbsMd
+
+SunPayus
+
+HeavyGod
+
+MATYS
+
+Not qualified
+
+#3![Image: FaZe](https://example.com/faze.png)
+
+FaZe(1650 Valve points)EU
+
+frozen
+
+Twistzz
+
+Neityu
+
+jcobbb
+
+JBOEN
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_data_model_version_busts_streamlit_cache(self):
-        self.assertEqual(DATA_MODEL_VERSION, "historical-lineups-v3")
+        self.assertEqual(DATA_MODEL_VERSION, "timeline-invites-v1")
 
     def test_standings_parser(self):
         rows = parse_standings(STANDINGS, "live/2026/standings_global_2026_07_06.md")
@@ -235,6 +295,30 @@ class ParserTests(unittest.TestCase):
         _, rows = parse_hltv_standings(HLTV_STANDINGS)
         roster = parse_hltv_match_roster(HLTV_PLAIN_MATCH, rows[0])
         self.assertEqual(roster, ["karrigan", "broky", "Twistzz", "jcobbb", "frozen"])
+
+    def test_recency_projection_and_timeline(self):
+        self.assertEqual(recency_weight(date(2026, 7, 1), date(2026, 7, 31)), 1.0)
+        self.assertEqual(recency_weight(date(2026, 1, 1), date(2026, 7, 3)), 0.0)
+        _, rows = parse_hltv_standings(HLTV_STANDINGS)
+        detail = parse_hltv_team_detail(HLTV_DETAIL, rows[0])
+        current = project_vrs(detail, date(2026, 7, 26))
+        future = project_vrs(detail, date(2026, 10, 26))
+        self.assertEqual(current["baseline_score"], detail["final_score"])
+        self.assertLess(future["baseline_score"], current["baseline_score"])
+        timeline = build_vrs_timeline(detail, weeks=4)
+        self.assertEqual(len(timeline["rows"]), 5)
+
+    def test_hltv_invite_cards_and_cutoff(self):
+        events = parse_hltv_invites(HLTV_INVITES, date(2026, 7, 26))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["name"], "EPL S24")
+        self.assertEqual(events[0]["allocations"]["Global"], 12)
+        self.assertEqual(events[1]["total_invites"], 29)
+        prediction = parse_hltv_invite_ranking(HLTV_INVITE_RANKING, events[0])
+        self.assertEqual(prediction["ranking_date"], "2026-08-03")
+        self.assertEqual(prediction["cutoff"]["team"], "G2")
+        self.assertEqual(prediction["first_out"]["team"], "FaZe")
+        self.assertFalse(prediction["rows"][-1]["qualified"])
 
     def test_three_of_five_threshold(self):
         detail = parse_team_detail(DETAIL)
