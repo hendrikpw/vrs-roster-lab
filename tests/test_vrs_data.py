@@ -307,6 +307,23 @@ class ParserTests(unittest.TestCase):
         self.assertLess(future["baseline_score"], current["baseline_score"])
         timeline = build_vrs_timeline(detail, weeks=4)
         self.assertEqual(len(timeline["rows"]), 5)
+        scheduled = build_vrs_timeline(
+            detail,
+            leaving=["frozen"],
+            replacements=["replacement"],
+            weeks=3,
+            change_date=date(2026, 8, 9),
+        )
+        self.assertFalse(scheduled["rows"][1]["change_active"])
+        self.assertEqual(
+            scheduled["rows"][1]["scenario_score"],
+            scheduled["rows"][1]["baseline_score"],
+        )
+        self.assertTrue(scheduled["rows"][2]["change_active"])
+        self.assertEqual(
+            scheduled["rows"][2]["scenario_score"],
+            scheduled["rows"][2]["projected_score"],
+        )
 
     def test_hltv_invite_cards_and_cutoff(self):
         events = parse_hltv_invites(HLTV_INVITES, date(2026, 7, 26))
