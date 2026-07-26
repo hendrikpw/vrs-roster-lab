@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 BO3_API_BASE = "https://api.bo3.gg/api/v1"
 BO3_SITE_BASE = "https://bo3.gg"
 USER_AGENT = "VRS-Roster-Lab/0.2"
-ACTIVE_MAP_FALLBACK = [
+CURRENT_ACTIVE_DUTY_MAP_POOL = [
     "Ancient",
     "Anubis",
     "Cache",
@@ -22,6 +22,7 @@ ACTIVE_MAP_FALLBACK = [
     "Mirage",
     "Nuke",
 ]
+CURRENT_POOL_EFFECTIVE_FROM = date(2026, 7, 9)
 
 
 class ProDataError(RuntimeError):
@@ -104,6 +105,30 @@ def search_teams(query: str, limit: int = 8) -> list[dict[str, Any]]:
         },
     )
     return payload.get("results", []) if isinstance(payload, dict) else []
+
+
+def load_active_map_pool() -> list[str]:
+    payload = _get_json(
+        "/maps",
+        {
+            "page[offset]": 0,
+            "page[limit]": 100,
+            "filter[discipline_id][eq]": 1,
+        },
+    )
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    active = sorted(
+        {
+            _map_name(str(row.get("map_name") or row.get("name") or ""))
+            for row in rows
+            if row.get("discipline_id") == 1 and row.get("map_pool") is True
+        }
+    )
+    if len(active) != 7:
+        raise ProDataError(
+            f"The current CS2 Active Duty pool returned {len(active)} maps instead of seven."
+        )
+    return active
 
 
 def resolve_player(query: str) -> dict[str, Any]:
@@ -328,11 +353,14 @@ def compare_players(current: dict[str, Any], candidate: dict[str, Any]) -> dict[
 
 
 def load_team_map_data(
-    query: str, days: int = 180, reference_date: date | None = None
+    query: str,
+    days: int = 180,
+    reference_date: date | None = None,
+    start_date: date | None = None,
 ) -> dict[str, Any]:
     team = resolve_team(query)
     reference_date = reference_date or date.today()
-    start_date = reference_date - timedelta(days=days)
+    start_date = start_date or reference_date - timedelta(days=days)
     payload = _get_json(
         "/matches",
         {
@@ -447,6 +475,8 @@ def load_team_map_data(
         "name": team["name"],
         "rank": team.get("rank"),
         "period_days": days,
+        "period_start": start_date.isoformat(),
+        "period_end": reference_date.isoformat(),
         "matches": matches_count,
         "match_wins": match_wins,
         "match_losses": match_losses,
@@ -478,19 +508,18 @@ def _series_probability(map_probabilities: list[float]) -> float:
 
 
 def predict_veto(
-    team_a: dict[str, Any], team_b: dict[str, Any], best_of: int = 3
+    team_a: dict[str, Any],
+    team_b: dict[str, Any],
+    best_of: int = 3,
+    active_map_pool: list[str] | None = None,
 ) -> dict[str, Any]:
     if best_of not in {3, 5}:
         raise ValueError("Only BO3 and BO5 vetoes are supported.")
     a_maps = {row["map"]: row for row in team_a["maps"]}
     b_maps = {row["map"]: row for row in team_b["maps"]}
-    pool = sorted(set(ACTIVE_MAP_FALLBACK) | set(a_maps) | set(b_maps))
-    if len(pool) > 7:
-        activity = {
-            name: (a_maps.get(name, {}).get("played", 0) + b_maps.get(name, {}).get("played", 0))
-            for name in pool
-        }
-        pool = sorted(pool, key=lambda name: activity[name], reverse=True)[:7]
+    pool = list(active_map_pool or CURRENT_ACTIVE_DUTY_MAP_POOL)
+    if len(pool) != 7 or len(set(pool)) != 7:
+        raise ValueError("The veto predictor requires exactly seven unique active maps.")
 
     overall_a = (team_a["match_wins"] + 2) / (team_a["matches"] + 4)
     overall_b = (team_b["match_wins"] + 2) / (team_b["matches"] + 4)
@@ -592,6 +621,7 @@ def predict_veto(
     selected_probabilities = [map_probability(map_name) for map_name in played_maps]
     return {
         "best_of": best_of,
+        "active_map_pool": pool,
         "sequence": sequence,
         "maps": comparisons,
         "played_maps": played_maps,
