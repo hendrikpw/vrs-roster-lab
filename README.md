@@ -10,6 +10,10 @@ how Counter-Strike roster changes affect the inheritance of historical results.
 - Applies Valve's public three-player roster-overlap rule to a simulated lineup.
 - Separates live scores from an explicitly labelled indicative roster-change estimate.
 - Uses Valve's official snapshot for historical-lineup enrichment and as a fallback.
+- Resolves newer event lineups from HLTV match pages instead of applying today's roster
+  to historical results.
+- Marks unresolved lineups as unknown and withholds the simulated score rather than
+  reporting a false retained/lost result.
 
 ## Run locally
 
