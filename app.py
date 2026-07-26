@@ -6,6 +6,14 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
+from pro_data import (
+    ProDataError,
+    compare_players,
+    load_player_profile,
+    load_team_map_data,
+    opponent_rank_summary,
+    predict_veto,
+)
 from vrs_data import (
     DATA_MODEL_VERSION,
     VRSDataError,
@@ -163,6 +171,16 @@ def get_invite_ranking(event: dict, data_model_version: str):
     return load_hltv_invite_ranking(event)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_player_profile(query: str, days: int, data_model_version: str):
+    return load_player_profile(query, days)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_team_map_profile(query: str, days: int, data_model_version: str):
+    return load_team_map_data(query, days)
+
+
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
 using_fallback = False
 try:
@@ -223,11 +241,21 @@ except VRSDataError:
 if using_fallback:
     st.warning("Live HLTV and official Valve data are temporarily unavailable. Showing the bundled FaZe demo.")
 
-analysis_tab, timeline_tab, invite_tab, rankings_tab, method_tab = st.tabs(
+(
+    analysis_tab,
+    timeline_tab,
+    invite_tab,
+    transfer_tab,
+    veto_tab,
+    rankings_tab,
+    method_tab,
+) = st.tabs(
     [
         "TEAM ANALYSIS",
         "VRS TIMELINE",
         "INVITE RACE",
+        "TRANSFER LAB",
+        "MAP VETO",
         "GLOBAL RANKINGS",
         "METHODOLOGY",
     ]
@@ -763,6 +791,429 @@ with invite_tab:
                 unsafe_allow_html=True,
             )
 
+with transfer_tab:
+    st.subheader(f"Transfer candidate comparison · {detail['team']}")
+    st.caption(
+        "Compare a current player with a potential replacement, then place the sporting "
+        "difference next to the modeled VRS inheritance impact."
+    )
+    transfer_controls = st.columns([0.8, 1.2, 0.7])
+    with transfer_controls[0]:
+        outgoing_player = st.selectbox(
+            "Current player",
+            detail["roster"],
+            key="transfer_outgoing_player",
+        )
+    with transfer_controls[1]:
+        candidate_query = st.text_input(
+            "Candidate",
+            placeholder="e.g. lauNX, siuhy, HeavyGod",
+            key="transfer_candidate_query",
+            help="Enter a professional player's nickname. The closest exact BO3.gg profile is used.",
+        )
+    with transfer_controls[2]:
+        comparison_window = st.selectbox(
+            "Stats window",
+            [90, 180],
+            index=1,
+            format_func=lambda days: f"Last {days // 30} months",
+            key="transfer_stats_window",
+        )
+
+    if not candidate_query.strip():
+        st.info("Enter a candidate nickname to run the sporting and VRS comparison.")
+    else:
+        try:
+            with st.spinner("Loading pro-play statistics…"):
+                current_profile = get_player_profile(
+                    outgoing_player, comparison_window, DATA_MODEL_VERSION
+                )
+                candidate_profile = get_player_profile(
+                    candidate_query.strip(), comparison_window, DATA_MODEL_VERSION
+                )
+            player_comparison = compare_players(current_profile, candidate_profile)
+        except ProDataError as exc:
+            player_comparison = None
+            st.warning(str(exc))
+
+        if player_comparison:
+            current_name = current_profile["nickname"]
+            candidate_name = candidate_profile["nickname"]
+            st.markdown(
+                f"**Resolved comparison:** {current_name} ({current_profile['team']}) "
+                f"→ {candidate_name} ({candidate_profile['team']})"
+            )
+            transfer_metrics = st.columns(5)
+            current_rating = current_profile["metrics"]["BO3 rating"]
+            candidate_rating = candidate_profile["metrics"]["BO3 rating"]
+            rating_delta = (
+                candidate_rating - current_rating
+                if current_rating is not None and candidate_rating is not None
+                else None
+            )
+            transfer_metrics[0].metric(
+                f"{current_name} rating",
+                f"{current_rating:.2f}" if current_rating is not None else "Unknown",
+            )
+            transfer_metrics[1].metric(
+                f"{candidate_name} rating",
+                f"{candidate_rating:.2f}" if candidate_rating is not None else "Unknown",
+                f"{rating_delta:+.2f}" if rating_delta is not None else None,
+            )
+            candidate_adr = candidate_profile["metrics"]["ADR"]
+            transfer_metrics[2].metric(
+                f"{candidate_name} ADR",
+                f"{candidate_adr:.1f}" if candidate_adr is not None else "Unknown",
+            )
+            opening = candidate_profile["metrics"]["Opening duel win %"]
+            transfer_metrics[3].metric(
+                "Opening duel win",
+                f"{opening:.1%}" if opening is not None else "Unknown",
+            )
+            similarity = player_comparison["style_similarity"]
+            transfer_metrics[4].metric(
+                "Style similarity",
+                f"{similarity:.0f}%" if similarity is not None else "Unknown",
+                help=(
+                    "Heuristic similarity across opening involvement, opening success, "
+                    "headshots, assists, trades and survival."
+                ),
+            )
+
+            def display_player_metric(metric: str, value):
+                if value is None:
+                    return "Unknown"
+                if "%" in metric:
+                    return f"{value:.1%}"
+                if metric in {"Maps", "Rounds", "Clutches"}:
+                    return f"{value:,.0f}"
+                if metric in {"ADR"}:
+                    return f"{value:.1f}"
+                return f"{value:.3f}"
+
+            comparison_rows = pd.DataFrame(
+                {
+                    "Metric": [row["metric"] for row in player_comparison["metrics"]],
+                    current_name: [
+                        display_player_metric(row["metric"], row["current"])
+                        for row in player_comparison["metrics"]
+                    ],
+                    candidate_name: [
+                        display_player_metric(row["metric"], row["candidate"])
+                        for row in player_comparison["metrics"]
+                    ],
+                }
+            )
+            st.dataframe(
+                comparison_rows,
+                width="stretch",
+                hide_index=True,
+            )
+
+            st.subheader("Map-by-map performance")
+            map_rows = pd.DataFrame(player_comparison["maps"])
+            if not map_rows.empty:
+                st.dataframe(
+                    map_rows.rename(
+                        columns={
+                            "map": "Map",
+                            "current_maps": f"{current_name} maps",
+                            "current_rating": f"{current_name} rating",
+                            "candidate_maps": f"{candidate_name} maps",
+                            "candidate_rating": f"{candidate_name} rating",
+                            "rating_delta": "Candidate delta",
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        f"{current_name} rating": st.column_config.NumberColumn(format="%.2f"),
+                        f"{candidate_name} rating": st.column_config.NumberColumn(format="%.2f"),
+                        "Candidate delta": st.column_config.NumberColumn(format="%+.2f"),
+                    },
+                )
+
+            st.subheader("VRS cost of the transfer")
+            transfer_simulation = simulate_roster(
+                detail,
+                [outgoing_player],
+                [candidate_name],
+            )
+            vrs_columns = st.columns(4)
+            vrs_columns[0].metric("Current VRS", f"{detail['final_score']:,.0f}")
+            vrs_columns[1].metric(
+                "Indicative VRS",
+                (
+                    f"{transfer_simulation['indicative_score']:,.0f}"
+                    if transfer_simulation["indicative_score"] is not None
+                    else "Unknown"
+                ),
+            )
+            vrs_columns[2].metric(
+                "VRS impact",
+                (
+                    f"{transfer_simulation['indicative_delta']:+,.0f}"
+                    if transfer_simulation["indicative_delta"] is not None
+                    else "Unknown"
+                ),
+            )
+            vrs_columns[3].metric(
+                "Historical matches lost",
+                transfer_simulation["lost_matches"],
+            )
+
+            style_rows = []
+            for indicator in current_profile["style"]:
+                left = current_profile["style"][indicator]
+                right = candidate_profile["style"][indicator]
+                style_rows.append(
+                    {
+                        "Playstyle indicator": indicator,
+                        current_name: f"{left:.1%}" if left is not None else "Unknown",
+                        candidate_name: f"{right:.1%}" if right is not None else "Unknown",
+                    }
+                )
+            with st.expander("Playstyle indicators and unavailable splits"):
+                st.dataframe(pd.DataFrame(style_rows), width="stretch", hide_index=True)
+                st.markdown(
+                    "**Currently unavailable from the stable automated source:** "
+                    + ", ".join(player_comparison["unavailable_splits"])
+                    + ". These values are shown as unavailable rather than estimated."
+                )
+
+            source_left, source_right = st.columns(2)
+            with source_left:
+                st.link_button(
+                    f"Open {current_name} on BO3.gg",
+                    current_profile["source_url"],
+                )
+            with source_right:
+                st.link_button(
+                    f"Open {candidate_name} on BO3.gg",
+                    candidate_profile["source_url"],
+                )
+            st.markdown(
+                """
+                <div class="disclaimer">
+                  BO3.gg uses its own 10-point player rating; it is not HLTV Rating 3.0.
+                  Style similarity describes statistical tendencies, not exact in-game roles,
+                  communication, contract availability or buyout cost. The VRS value remains
+                  an inheritance estimate using the verified historical lineups.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+with veto_tab:
+    st.subheader("Map veto predictor")
+    st.caption(
+        "Build a likely veto from recent picks, bans and map results. The prediction is "
+        "descriptive and does not use betting odds."
+    )
+    veto_controls = st.columns([1, 1, 0.55, 0.55, 0.55])
+    with veto_controls[0]:
+        team_a_name = st.selectbox(
+            "Team A",
+            team_names,
+            index=team_names.index(selected_name),
+            key="veto_team_a",
+        )
+    default_opponent = (
+        "Spirit"
+        if "Spirit" in team_names and selected_name != "Spirit"
+        else next(name for name in team_names if name != selected_name)
+    )
+    with veto_controls[1]:
+        team_b_name = st.selectbox(
+            "Team B",
+            team_names,
+            index=team_names.index(default_opponent),
+            key="veto_team_b",
+        )
+    with veto_controls[2]:
+        veto_window = st.selectbox(
+            "Form",
+            [90, 180],
+            index=1,
+            format_func=lambda days: f"{days // 30} months",
+            key="veto_window",
+        )
+    with veto_controls[3]:
+        best_of = st.selectbox(
+            "Format",
+            [3, 5],
+            format_func=lambda value: f"BO{value}",
+            key="veto_best_of",
+        )
+    with veto_controls[4]:
+        run_veto = st.button(
+            "Build veto",
+            type="primary",
+            width="stretch",
+        )
+
+    if team_a_name == team_b_name:
+        st.warning("Choose two different teams.")
+    elif run_veto:
+        try:
+            with st.spinner("Loading recent maps and vetoes…"):
+                team_a_data = get_team_map_profile(
+                    team_a_name, veto_window, DATA_MODEL_VERSION
+                )
+                team_b_data = get_team_map_profile(
+                    team_b_name, veto_window, DATA_MODEL_VERSION
+                )
+            st.session_state["veto_result"] = {
+                "key": (team_a_name, team_b_name, veto_window, best_of),
+                "team_a": team_a_data,
+                "team_b": team_b_data,
+                "prediction": predict_veto(team_a_data, team_b_data, best_of),
+            }
+        except ProDataError as exc:
+            st.warning(str(exc))
+
+    stored_veto = st.session_state.get("veto_result")
+    current_veto_key = (team_a_name, team_b_name, veto_window, best_of)
+    if not stored_veto or stored_veto.get("key") != current_veto_key:
+        if team_a_name != team_b_name:
+            st.info("Press “Build veto” to load the selected matchup.")
+    else:
+        team_a_data = stored_veto["team_a"]
+        team_b_data = stored_veto["team_b"]
+        veto_prediction = stored_veto["prediction"]
+        a_strength = opponent_rank_summary(team_a_data, standings)
+        b_strength = opponent_rank_summary(team_b_data, standings)
+        veto_metrics = st.columns(6)
+        veto_metrics[0].metric(
+            f"{team_a_data['name']} form",
+            (
+                f"{team_a_data['match_win_rate']:.1%}"
+                if team_a_data["match_win_rate"] is not None
+                else "Unknown"
+            ),
+            f"{team_a_data['matches']} series",
+        )
+        veto_metrics[1].metric(
+            f"{team_b_data['name']} form",
+            (
+                f"{team_b_data['match_win_rate']:.1%}"
+                if team_b_data["match_win_rate"] is not None
+                else "Unknown"
+            ),
+            f"{team_b_data['matches']} series",
+        )
+        veto_metrics[2].metric(
+            f"{team_a_data['name']} opponent rank",
+            (
+                f"#{a_strength['average_rank']:.1f}"
+                if a_strength["average_rank"] is not None
+                else "Unknown"
+            ),
+            f"{a_strength['matched']}/{a_strength['total']} ranked",
+        )
+        veto_metrics[3].metric(
+            f"{team_b_data['name']} opponent rank",
+            (
+                f"#{b_strength['average_rank']:.1f}"
+                if b_strength["average_rank"] is not None
+                else "Unknown"
+            ),
+            f"{b_strength['matched']}/{b_strength['total']} ranked",
+        )
+        veto_metrics[4].metric(
+            f"{team_a_data['name']} BO{best_of}",
+            f"{veto_prediction['team_a_series_probability']:.1%}",
+        )
+        veto_metrics[5].metric(
+            f"{team_b_data['name']} BO{best_of}",
+            f"{veto_prediction['team_b_series_probability']:.1%}",
+        )
+
+        st.subheader("Predicted veto sequence")
+        st.dataframe(
+            pd.DataFrame(veto_prediction["sequence"]).rename(
+                columns={
+                    "step": "Step",
+                    "team": "Team",
+                    "action": "Action",
+                    "map": "Map",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.subheader("Map pool comparison")
+        veto_maps = pd.DataFrame(veto_prediction["maps"])
+        veto_maps["Selected"] = veto_maps["selected"].map(
+            {True: "Played", False: "Removed"}
+        )
+        st.dataframe(
+            veto_maps[
+                [
+                    "map",
+                    "team_a_played",
+                    "team_a_win_rate",
+                    "team_a_picks",
+                    "team_a_bans",
+                    "team_b_played",
+                    "team_b_win_rate",
+                    "team_b_picks",
+                    "team_b_bans",
+                    "team_a_probability",
+                    "Selected",
+                ]
+            ].rename(
+                columns={
+                    "map": "Map",
+                    "team_a_played": f"{team_a_data['name']} maps",
+                    "team_a_win_rate": f"{team_a_data['name']} win rate",
+                    "team_a_picks": f"{team_a_data['name']} picks",
+                    "team_a_bans": f"{team_a_data['name']} bans",
+                    "team_b_played": f"{team_b_data['name']} maps",
+                    "team_b_win_rate": f"{team_b_data['name']} win rate",
+                    "team_b_picks": f"{team_b_data['name']} picks",
+                    "team_b_bans": f"{team_b_data['name']} bans",
+                    "team_a_probability": f"{team_a_data['name']} map probability",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                f"{team_a_data['name']} win rate": st.column_config.NumberColumn(
+                    format="percent"
+                ),
+                f"{team_b_data['name']} win rate": st.column_config.NumberColumn(
+                    format="percent"
+                ),
+                f"{team_a_data['name']} map probability": st.column_config.NumberColumn(
+                    format="percent"
+                ),
+            },
+        )
+        source_a, source_b = st.columns(2)
+        with source_a:
+            st.link_button(
+                f"Open {team_a_data['name']} on BO3.gg",
+                team_a_data["source_url"],
+            )
+        with source_b:
+            st.link_button(
+                f"Open {team_b_data['name']} on BO3.gg",
+                team_b_data["source_url"],
+            )
+        st.markdown(
+            """
+            <div class="disclaimer">
+              The veto is a heuristic based on recent team-owned picks and bans, smoothed
+              map win rates and recent series form. It cannot know an event's private prep,
+              stand-ins or one-off tactical choices. Percentages are model estimates, not
+              betting probabilities.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
 with rankings_tab:
     st.subheader(f"Global standings · {snapshot['date'].replace('_', '-')}")
     st.caption(snapshot.get("source", "Valve official snapshot"))
@@ -812,12 +1263,20 @@ with method_tab:
         **Invite race.** Upcoming event dates, predicted rankings and qualification lines come from
         HLTV's VRS invite pages. These are forecasts for the invite date, not confirmed invitations.
 
+        **Transfer Lab.** Recent player and map statistics come from BO3.gg because HLTV's regular
+        statistics pages block automated Streamlit requests. BO3.gg's 10-point rating is not directly
+        comparable with HLTV Rating 3.0. Statistical style similarity is a heuristic, not a role label.
+
+        **Map veto.** The suggested BO3/BO5 veto uses recent team-owned picks and bans, map results,
+        smoothed win rates and series form. It cannot account for private preparation, stand-ins or
+        event-specific tactics, and its probabilities are not betting odds.
+
         **Missing lineup safety.** A historical result is never assigned the current roster by default.
         If neither source can verify its lineup, it is marked **Unknown** and no simulated score is shown
         until the missing history can be resolved.
         """
     )
-    link_left, link_middle, link_right = st.columns(3)
+    link_left, link_middle, link_pro, link_right = st.columns(4)
     with link_left:
         st.link_button("Open HLTV's live VRS", "https://www.hltv.org/valve-ranking/teams")
     with link_middle:
@@ -825,6 +1284,8 @@ with method_tab:
             "Open HLTV's invite predictions",
             "https://www.hltv.org/valve-ranking/invites",
         )
+    with link_pro:
+        st.link_button("Open BO3.gg pro statistics", "https://bo3.gg/")
     with link_right:
         st.link_button(
             "Open Valve's official VRS repository",
