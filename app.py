@@ -228,6 +228,77 @@ def resolve_team_detail(team_row: dict) -> dict:
     return get_official_detail(team_row["detail_url"])
 
 
+@st.dialog("How VRS works", width="large")
+def show_vrs_guide():
+    st.markdown(
+        """
+        VRS is Valve's ranking score for deciding invitations and seeding. A result does
+        **not** award one fixed number of VRS points. The full ranking is recalculated
+        from several signals.
+        """
+    )
+
+    st.markdown("### What a win can improve")
+    st.markdown(
+        """
+        | Signal | Simple meaning |
+        |---|---|
+        | **Head-to-head** | Beating a stronger team helps more than beating a weaker team. |
+        | **Opponent network** | Wins over teams with strong results are worth more. |
+        | **Bounty collected** | The opponent's recent prize-money strength matters. |
+        | **LAN wins** | Relevant offline wins provide additional support. |
+        """
+    )
+
+    st.markdown("### Simple example")
+    example_left, example_middle, example_right = st.columns(3)
+    example_left.metric("Before the match", "1,600 VRS")
+    example_middle.metric("Match-history row", "+22 H2H")
+    example_right.metric("Example reranking", "1,635 VRS", "+35")
+
+    st.info(
+        "A team with 1,600 VRS beats a stronger opponent in a LAN BO3. The match may "
+        "show **+22 H2H**, but that is only the head-to-head adjustment — not +22 VRS. "
+        "After LAN, opponent and bounty support plus the global recalculation, the "
+        "illustrative final change is +35 VRS."
+    )
+    st.caption(
+        "The numbers are an example, not a prediction. Exact impact depends on the "
+        "full global field, result age, event weight and which results remain in each "
+        "team's top ten."
+    )
+
+    st.markdown("### Why the impact can change")
+    st.markdown(
+        """
+        - Only the best relevant results are retained, so a new result can replace an older one.
+        - Results lose weight with age.
+        - Every opponent's results can affect the network.
+        - The final scores are normalized across the global ranking.
+        """
+    )
+
+    st.markdown("### Roster changes: the 3/5 rule")
+    st.markdown(
+        """
+        Historical results stay with the ranked team while at least **three of the five
+        players** from that result remain in the new roster.
+
+        - **One replacement:** 4/5 remain → the result stays.
+        - **Two replacements:** 3/5 remain → the result still stays, but is at risk.
+        - **Three replacements:** only 2/5 remain → the result no longer carries over.
+
+        This applies immediately. The new lineup does not need to play five matches
+        before the old results can be checked for roster eligibility.
+        """
+    )
+
+    st.warning(
+        "Remember: **H2H adjustment is not VRS points earned.** The app labels exact "
+        "official scores separately from estimates and roster-inheritance simulations."
+    )
+
+
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
 using_fallback = False
 try:
@@ -250,6 +321,16 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+guide_spacer, guide_action = st.columns([5.5, 1])
+with guide_action:
+    if st.button(
+        "HOW VRS WORKS",
+        icon=":material/help_outline:",
+        width="stretch",
+        key="open_vrs_guide",
+    ):
+        show_vrs_guide()
 
 team_names = [row["team"] for row in standings]
 selected_name = st.selectbox(
@@ -478,7 +559,9 @@ with analysis_tab:
                 lambda row: row.get("roster_source", "Bundled / official"),
                 axis=1,
             )
-            match_rows["H2H"] = match_rows["h2h"].map(lambda value: f"{value:+.2f}")
+            match_rows["H2H adjustment"] = match_rows["h2h"].map(
+                lambda value: f"{value:+.2f}"
+            )
             match_rows["Factor support"] = (
                 match_rows["bounty_adjusted"]
                 + match_rows["network_adjusted"]
@@ -493,7 +576,7 @@ with analysis_tab:
                     "Core",
                     "Core overlap",
                     "Lineup source",
-                    "H2H",
+                    "H2H adjustment",
                     "status",
                 ]
             ].rename(
@@ -510,6 +593,14 @@ with analysis_tab:
                 width="stretch",
                 hide_index=True,
                 height=430,
+                column_config={
+                    "H2H adjustment": st.column_config.TextColumn(
+                        help=(
+                            "One component of the VRS model. This is not the number "
+                            "of VRS points earned from the match."
+                        )
+                    ),
+                },
             )
         else:
             st.info("No contributing matches were listed for this roster.")
