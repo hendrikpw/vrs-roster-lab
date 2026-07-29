@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import html
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from pro_data import (
     CURRENT_POOL_EFFECTIVE_FROM,
@@ -1401,6 +1403,68 @@ with transfer_tab:
                         "Candidate delta": st.column_config.NumberColumn(format="%+.2f"),
                     },
                 )
+
+            st.divider()
+            st.subheader("Role & position scout")
+            st.caption(
+                "Check the resolved players in NER0's live Positions Database before judging "
+                "the transfer. The workbook separates overall, T-side and CT-side role views."
+            )
+            role_player = st.radio(
+                "Player to inspect",
+                [current_name, candidate_name],
+                horizontal=True,
+                key="transfer_role_player",
+            )
+            ner0_base_url = (
+                "https://public.tableau.com/views/"
+                "PositionsDatabaseNER0cs/PositionsDatabaseNER0cs"
+            )
+            ner0_embed_url = (
+                f"{ner0_base_url}?:showVizHome=no&:embed=yes&Name="
+                f"{quote(role_player, safe='')}"
+            )
+            components.iframe(ner0_embed_url, height=860, scrolling=True)
+
+            role_help = st.columns(3)
+            with role_help[0]:
+                st.markdown(
+                    "**1 · Overall role**  \\n"
+                    "Start with the role label and compare whether the candidate replaces the "
+                    "same job or changes the structure."
+                )
+            with role_help[1]:
+                st.markdown(
+                    "**2 · T and CT separately**  \\n"
+                    "Open the T Roles and CT Roles sheets. A player can fit on one side while "
+                    "creating a position conflict on the other."
+                )
+            with role_help[2]:
+                st.markdown(
+                    "**3 · Check the sample**  \\n"
+                    "Use the Last12/sample information before trusting a tendency. Small samples "
+                    "are context, not a reliable verdict."
+                )
+
+            st.link_button(
+                "Open the full NER0 Positions Database",
+                (
+                    "https://public.tableau.com/app/profile/harry.richards4213/"
+                    "viz/PositionsDatabaseNER0cs/PositionsDatabaseNER0cs"
+                ),
+            )
+            st.markdown(
+                """
+                <div class="disclaimer">
+                  Source: NER0 / Harry Richards on Tableau Public. This is the live source
+                  visualization, not a copied or invented role score. Role labels and positions
+                  describe observed usage; they do not measure communication, calling,
+                  adaptability or guarantee that a transfer will work. If an alias does not
+                  resolve in the embedded filter, open the full database and search for the player.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
             st.subheader("VRS cost of the transfer")
             transfer_simulation = simulate_roster(
