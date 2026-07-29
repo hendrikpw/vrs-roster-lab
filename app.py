@@ -1341,13 +1341,15 @@ with transfer_tab:
                 "Opening duel win",
                 f"{opening:.1%}" if opening is not None else "Unknown",
             )
-            similarity = player_comparison["style_similarity"]
+            role_fit_summary = player_comparison["role_fit"]["score"]
             transfer_metrics[4].metric(
-                "Style similarity",
-                f"{similarity:.0f}%" if similarity is not None else "Unknown",
+                "Role fit",
+                f"{role_fit_summary:.0f} / 100"
+                if role_fit_summary is not None
+                else "Unknown",
                 help=(
-                    "Heuristic similarity across opening involvement, opening success, "
-                    "headshots, assists, trades and survival."
+                    "Weighted statistical role similarity across opening involvement, "
+                    "trading, assists, survival, headshots and opening success."
                 ),
             )
 
@@ -1425,11 +1427,13 @@ with transfer_tab:
                     "Confidence uses the smaller sample of the two players, based on rounds, "
                     "maps and available comparison fields. It does not change the fit score."
                 ),
+                delta_color="off",
             )
             fit_columns[3].metric(
                 "Indicators compared",
                 f"{role_fit['compared_metrics']} / {role_fit['total_metrics']}",
                 f"{role_fit['minimum_maps']} maps · {role_fit['minimum_rounds']} rounds",
+                delta_color="off",
             )
             if role_score is not None:
                 st.progress(role_score / 100)
