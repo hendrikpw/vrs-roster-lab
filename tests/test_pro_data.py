@@ -169,6 +169,10 @@ class ProDataTests(unittest.TestCase):
         self.assertAlmostEqual(rating["delta"], 0.4)
         self.assertAlmostEqual(result["maps"][0]["rating_delta"], 0.5)
         self.assertGreater(result["style_similarity"], 90)
+        self.assertGreater(result["role_fit"]["score"], 85)
+        self.assertEqual(result["role_fit"]["label"], "Like-for-like")
+        self.assertEqual(result["role_fit"]["compared_metrics"], 2)
+        self.assertEqual(result["role_fit"]["total_metrics"], 6)
 
     def test_team_match_and_veto_parsing(self):
         payload = {
