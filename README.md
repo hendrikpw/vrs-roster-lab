@@ -23,6 +23,8 @@ how Counter-Strike roster changes affect the inheritance of historical results.
 - Compares transfer candidates with current players across recent form, map ratings,
   opening duels, trading, side results and statistical playstyle indicators.
 - Places the candidate's sporting profile beside the modeled VRS inheritance cost.
+- Builds app-owned role and tendency tables, with RDY overall roles as a fallback and
+  explicit missing-data labels for unavailable map-specific CT/T positions.
 - Builds BO3 and BO5 veto suggestions from recent map results plus team-owned picks
   and bans, with smoothed map and series probabilities.
 - Loads the current seven-map Active Duty pool dynamically and defaults veto form to
@@ -56,6 +58,10 @@ streamlit run app.py
 - [BO3.gg](https://bo3.gg/) provides the automated pro-player, map-result and veto
   statistics used by Transfer Lab and Map Veto. Its player rating is a separate
   10-point metric and is not HLTV Rating 3.0.
+- [NER0's Positions Database](https://public.tableau.com/app/profile/harry.richards4213/viz/PositionsDatabaseNER0cs/PositionsDatabaseNER0cs)
+  remains the reference for exact map positions when a structured record exists.
+- [RDY Stats Lab](https://rdy.gg/en/cs2/stats?tab=player-positions) supplies published
+  role context. Missing T/CT positions are not inferred silently.
 
 The simulated score is an inheritance estimate, not an official reranking. A roster
 change can alter the global opponent network, top-ten selection and head-to-head
