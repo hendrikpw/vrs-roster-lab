@@ -1100,8 +1100,8 @@ with timeline_tab:
 with invite_tab:
     st.subheader("Tournament invite race")
     st.caption(
-        "Explore HLTV's predicted VRS ranking at upcoming tournament invite dates. "
-        "The qualification line is event- and region-specific."
+        "Compare today's live VRS with HLTV's projected ranking at an upcoming "
+        "tournament invite date. The qualification line is event- and region-specific."
     )
     try:
         invite_events = get_invites(DATA_MODEL_VERSION)
@@ -1181,14 +1181,39 @@ with invite_tab:
                         f"{points_needed:,} more points than the current cutoff."
                     )
 
+            projection_date = invite_ranking["ranking_date"]
+            st.info(
+                f"This table is HLTV's projection for **{projection_date}**, not today's "
+                "live ranking. The comparison columns below show both values."
+            )
             cutoff_points = cutoff["points"] if cutoff else None
+            current_points_by_team = {
+                row["team"].casefold(): row["points"] for row in standings
+            }
+            projected_points = [row["points"] for row in track_rows]
+            current_live_points = [
+                current_points_by_team.get(row["team"].casefold())
+                for row in track_rows
+            ]
             race_table = pd.DataFrame(
                 {
-                    "Rank": [row["rank"] for row in track_rows],
+                    "Projected rank": [row["rank"] for row in track_rows],
                     "Team": [row["team"] for row in track_rows],
-                    "Points": [row["points"] for row in track_rows],
+                    "Current live VRS": current_live_points,
+                    f"Projected VRS on {projection_date}": projected_points,
+                    "Change by invite date": [
+                        (
+                            projected - current
+                            if current is not None
+                            else None
+                        )
+                        for projected, current in zip(
+                            projected_points,
+                            current_live_points,
+                        )
+                    ],
                     "Status": [row["status"] for row in track_rows],
-                    "Gap to cutoff": [
+                    "Gap to projected cutoff": [
                         row["points"] - cutoff_points if cutoff_points is not None else None
                         for row in track_rows
                     ],
@@ -1201,9 +1226,25 @@ with invite_tab:
                 hide_index=True,
                 height=620,
                 column_config={
-                    "Rank": st.column_config.NumberColumn(format="#%d"),
-                    "Points": st.column_config.NumberColumn(format="%d"),
-                    "Gap to cutoff": st.column_config.NumberColumn(format="%+d"),
+                    "Projected rank": st.column_config.NumberColumn(format="#%d"),
+                    "Current live VRS": st.column_config.NumberColumn(
+                        format="%d",
+                        help="Current value from HLTV's live Valve ranking.",
+                    ),
+                    f"Projected VRS on {projection_date}": st.column_config.NumberColumn(
+                        format="%d",
+                        help=(
+                            "HLTV's predicted value at the selected tournament's "
+                            "invite date."
+                        ),
+                    ),
+                    "Change by invite date": st.column_config.NumberColumn(
+                        format="%+d",
+                        help="Projected VRS minus current live VRS.",
+                    ),
+                    "Gap to projected cutoff": st.column_config.NumberColumn(
+                        format="%+d"
+                    ),
                 },
             )
             st.link_button("Open this prediction on HLTV", chosen_event["event_url"])
