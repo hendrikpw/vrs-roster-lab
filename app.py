@@ -1429,19 +1429,19 @@ with transfer_tab:
             role_help = st.columns(3)
             with role_help[0]:
                 st.markdown(
-                    "**1 · Overall role**  \\n"
+                    "**1 · Overall role**  \n"
                     "Start with the role label and compare whether the candidate replaces the "
                     "same job or changes the structure."
                 )
             with role_help[1]:
                 st.markdown(
-                    "**2 · T and CT separately**  \\n"
+                    "**2 · T and CT separately**  \n"
                     "Open the T Roles and CT Roles sheets. A player can fit on one side while "
                     "creating a position conflict on the other."
                 )
             with role_help[2]:
                 st.markdown(
-                    "**3 · Check the sample**  \\n"
+                    "**3 · Check the sample**  \n"
                     "Use the Last12/sample information before trusting a tendency. Small samples "
                     "are context, not a reliable verdict."
                 )
