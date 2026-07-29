@@ -344,10 +344,95 @@ def compare_players(current: dict[str, Any], candidate: dict[str, Any]) -> dict[
         if left is not None and right is not None
     ]
     style_similarity = 100 * (1 - sum(distances) / len(distances)) if distances else None
+
+    # Statistical role fit measures how closely the candidate mirrors the outgoing
+    # player's observed involvement. Performance values such as rating and ADR stay
+    # separate so a stronger player with a different job is not mislabeled as a
+    # like-for-like replacement.
+    role_dimensions = {
+        "Opening involvement": {"weight": 0.30, "tolerance": 0.08},
+        "Trade-kill share": {"weight": 0.20, "tolerance": 0.25},
+        "Assist rate": {"weight": 0.15, "tolerance": 0.07},
+        "Survival rate": {"weight": 0.15, "tolerance": 0.18},
+        "Headshot share": {"weight": 0.10, "tolerance": 0.35},
+        "Opening success": {"weight": 0.10, "tolerance": 0.20},
+    }
+    role_breakdown = []
+    available_weight = 0.0
+    weighted_fit = 0.0
+    for indicator, config in role_dimensions.items():
+        current_value = current["style"].get(indicator)
+        candidate_value = candidate["style"].get(indicator)
+        if current_value is None or candidate_value is None:
+            continue
+        difference = candidate_value - current_value
+        similarity = max(
+            0.0,
+            1.0 - abs(difference) / config["tolerance"],
+        )
+        available_weight += config["weight"]
+        weighted_fit += similarity * config["weight"]
+        role_breakdown.append(
+            {
+                "indicator": indicator,
+                "current": current_value,
+                "candidate": candidate_value,
+                "difference": difference,
+                "weight": config["weight"],
+                "similarity": similarity,
+            }
+        )
+
+    role_fit_score = (
+        100 * weighted_fit / available_weight if available_weight else None
+    )
+    if role_fit_score is None:
+        role_fit_label = "Unavailable"
+    elif role_fit_score >= 85:
+        role_fit_label = "Like-for-like"
+    elif role_fit_score >= 70:
+        role_fit_label = "Similar with adjustments"
+    elif role_fit_score >= 55:
+        role_fit_label = "Noticeable role change"
+    else:
+        role_fit_label = "Major role change"
+
+    current_rounds = float(current["metrics"].get("Rounds") or 0)
+    candidate_rounds = float(candidate["metrics"].get("Rounds") or 0)
+    current_map_count = float(current["metrics"].get("Maps") or 0)
+    candidate_map_count = float(candidate["metrics"].get("Maps") or 0)
+    shared_rounds = min(current_rounds, candidate_rounds)
+    shared_maps = min(current_map_count, candidate_map_count)
+    metric_coverage = available_weight / sum(
+        config["weight"] for config in role_dimensions.values()
+    )
+    confidence_score = 100 * (
+        0.55 * min(shared_rounds / 600, 1.0)
+        + 0.25 * min(shared_maps / 25, 1.0)
+        + 0.20 * metric_coverage
+    )
+    if confidence_score >= 80:
+        confidence_label = "High"
+    elif confidence_score >= 50:
+        confidence_label = "Medium"
+    else:
+        confidence_label = "Low"
+
     return {
         "metrics": metrics,
         "maps": maps,
         "style_similarity": style_similarity,
+        "role_fit": {
+            "score": role_fit_score,
+            "label": role_fit_label,
+            "breakdown": role_breakdown,
+            "confidence_score": confidence_score,
+            "confidence_label": confidence_label,
+            "compared_metrics": len(role_breakdown),
+            "total_metrics": len(role_dimensions),
+            "minimum_rounds": int(shared_rounds),
+            "minimum_maps": int(shared_maps),
+        },
         "unavailable_splits": ["LAN / online", "Top 10", "Top 20", "Top 30"],
     }
 
