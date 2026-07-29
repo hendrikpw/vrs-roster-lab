@@ -1404,6 +1404,69 @@ with transfer_tab:
                     },
                 )
 
+            role_fit = player_comparison["role_fit"]
+            st.subheader("Statistical role fit")
+            st.caption(
+                "Measures how closely the candidate mirrors the outgoing player's statistical "
+                "job. This is a role-similarity score, not a rating of who is the better player."
+            )
+            fit_columns = st.columns(4)
+            role_score = role_fit["score"]
+            fit_columns[0].metric(
+                "Role fit",
+                f"{role_score:.0f} / 100" if role_score is not None else "Unavailable",
+            )
+            fit_columns[1].metric("Interpretation", role_fit["label"])
+            fit_columns[2].metric(
+                "Sample confidence",
+                role_fit["confidence_label"],
+                f"{role_fit['confidence_score']:.0f} / 100",
+                help=(
+                    "Confidence uses the smaller sample of the two players, based on rounds, "
+                    "maps and available comparison fields. It does not change the fit score."
+                ),
+            )
+            fit_columns[3].metric(
+                "Indicators compared",
+                f"{role_fit['compared_metrics']} / {role_fit['total_metrics']}",
+                f"{role_fit['minimum_maps']} maps · {role_fit['minimum_rounds']} rounds",
+            )
+            if role_score is not None:
+                st.progress(role_score / 100)
+
+            role_rows = pd.DataFrame(
+                [
+                    {
+                        "Indicator": row["indicator"],
+                        current_name: f"{row['current']:.1%}",
+                        candidate_name: f"{row['candidate']:.1%}",
+                        "Difference": f"{row['difference']:+.1%}",
+                        "Weight": f"{row['weight']:.0%}",
+                        "Similarity": f"{row['similarity']:.0%}",
+                    }
+                    for row in role_fit["breakdown"]
+                ]
+            )
+            if not role_rows.empty:
+                st.dataframe(role_rows, width="stretch", hide_index=True)
+
+            with st.expander("How the role-fit score works"):
+                st.markdown(
+                    """
+                    The score compares six observed tendencies. Opening involvement carries
+                    the most weight because it strongly describes who takes first-contact
+                    responsibility. Trade share, assists and survival describe spacing and
+                    support tendencies; headshot share and opening success have smaller weights.
+
+                    Each indicator receives a similarity score from its percentage-point
+                    difference. The weighted values are combined and renormalized when a field
+                    is unavailable. **Rating, ADR and K/D are deliberately excluded:** they
+                    describe performance, not whether two players perform the same job.
+                    Exact T-side routes and CT positions are not yet part of the calculation;
+                    use the NER0 scout below as the positional cross-check.
+                    """
+                )
+
             st.divider()
             st.subheader("Role & position scout")
             st.caption(
