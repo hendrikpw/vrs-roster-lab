@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import html
 from datetime import date, datetime, timedelta
-from urllib.parse import quote
-
 import altair as alt
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from pro_data import (
     CURRENT_POOL_EFFECTIVE_FROM,
@@ -19,6 +16,7 @@ from pro_data import (
     opponent_rank_summary,
     predict_veto,
 )
+from role_data import load_rdy_role_profile
 from vrs_data import (
     DATA_MODEL_VERSION,
     VRSDataError,
@@ -184,6 +182,11 @@ def get_invite_ranking(event: dict, data_model_version: str):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_player_profile(query: str, days: int, data_model_version: str):
     return load_player_profile(query, days)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_rdy_role_profile(query: str):
+    return load_rdy_role_profile(query)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1343,7 +1346,7 @@ with transfer_tab:
             )
             role_fit_summary = player_comparison["role_fit"]["score"]
             transfer_metrics[4].metric(
-                "Role fit",
+                "Role fit · provisional",
                 f"{role_fit_summary:.0f} / 100"
                 if role_fit_summary is not None
                 else "Unknown",
@@ -1472,62 +1475,133 @@ with transfer_tab:
                 )
 
             st.divider()
-            st.subheader("Role & position scout")
+            st.subheader("Role & position data")
             st.caption(
-                "Check the resolved players in NER0's live Positions Database before judging "
-                "the transfer. The workbook separates overall, T-side and CT-side role views."
+                "App-owned tables combine RDY's published overall role with BO3.gg tendencies. "
+                "Exact map positions remain unavailable until a structured NER0/RDY record exists."
             )
-            role_player = st.radio(
-                "Player to inspect",
-                [current_name, candidate_name],
-                horizontal=True,
-                key="transfer_role_player",
-            )
-            ner0_base_url = (
-                "https://public.tableau.com/views/"
-                "PositionsDatabaseNER0cs/PositionsDatabaseNER0cs"
-            )
-            ner0_embed_url = (
-                f"{ner0_base_url}?:showVizHome=no&:embed=yes&Name="
-                f"{quote(role_player, safe='')}"
-            )
-            components.iframe(ner0_embed_url, height=860, scrolling=True)
 
-            role_help = st.columns(3)
-            with role_help[0]:
-                st.markdown(
-                    "**1 · Overall role**  \n"
-                    "Start with the role label and compare whether the candidate replaces the "
-                    "same job or changes the structure."
-                )
-            with role_help[1]:
-                st.markdown(
-                    "**2 · T and CT separately**  \n"
-                    "Open the T Roles and CT Roles sheets. A player can fit on one side while "
-                    "creating a position conflict on the other."
-                )
-            with role_help[2]:
-                st.markdown(
-                    "**3 · Check the sample**  \n"
-                    "Use the Last12/sample information before trusting a tendency. Small samples "
-                    "are context, not a reliable verdict."
+            with st.spinner("Checking published role coverage…"):
+                current_role_source = get_rdy_role_profile(current_name)
+                candidate_role_source = get_rdy_role_profile(candidate_name)
+
+            role_source_rows = pd.DataFrame(
+                [
+                    {
+                        "Player": player_name,
+                        "Overall role": source_profile["overall_role"] or "Unavailable",
+                        "Role score": (
+                            f"{source_profile['role_score']:.0f}"
+                            if source_profile["role_score"] is not None
+                            else "—"
+                        ),
+                        "Team at source": source_profile["team"] or "Unknown",
+                        "CT/T map coverage": "0 / 7 structured",
+                        "Status": source_profile["status"],
+                        "Source": source_profile["source"],
+                    }
+                    for player_name, source_profile in [
+                        (current_name, current_role_source),
+                        (candidate_name, candidate_role_source),
+                    ]
+                ]
+            )
+            st.dataframe(role_source_rows, width="stretch", hide_index=True)
+
+            tendency_rows = []
+            for profile in [current_profile, candidate_profile]:
+                profile_metrics = profile["metrics"]
+                profile_style = profile["style"]
+                tendency_rows.append(
+                    {
+                        "Player": profile["nickname"],
+                        "T round win": (
+                            f"{profile_metrics['T round win %']:.1%}"
+                            if profile_metrics["T round win %"] is not None
+                            else "Unavailable"
+                        ),
+                        "CT round win": (
+                            f"{profile_metrics['CT round win %']:.1%}"
+                            if profile_metrics["CT round win %"] is not None
+                            else "Unavailable"
+                        ),
+                        "Opening involvement": (
+                            f"{profile_style['Opening involvement']:.1%}"
+                            if profile_style["Opening involvement"] is not None
+                            else "Unavailable"
+                        ),
+                        "Opening success": (
+                            f"{profile_style['Opening success']:.1%}"
+                            if profile_style["Opening success"] is not None
+                            else "Unavailable"
+                        ),
+                        "Trade-kill share": (
+                            f"{profile_style['Trade-kill share']:.1%}"
+                            if profile_style["Trade-kill share"] is not None
+                            else "Unavailable"
+                        ),
+                        "Assist rate": (
+                            f"{profile_style['Assist rate']:.1%}"
+                            if profile_style["Assist rate"] is not None
+                            else "Unavailable"
+                        ),
+                        "Survival rate": (
+                            f"{profile_style['Survival rate']:.1%}"
+                            if profile_style["Survival rate"] is not None
+                            else "Unavailable"
+                        ),
+                        "Sample": (
+                            f"{profile_metrics['Maps']} maps · "
+                            f"{profile_metrics['Rounds']} rounds"
+                        ),
+                        "Source": "BO3.gg",
+                    }
                 )
 
-            st.link_button(
-                "Open the full NER0 Positions Database",
-                (
-                    "https://public.tableau.com/app/profile/harry.richards4213/"
-                    "viz/PositionsDatabaseNER0cs/PositionsDatabaseNER0cs"
-                ),
+            st.markdown("#### Side and playstyle tendencies")
+            st.dataframe(
+                pd.DataFrame(tendency_rows),
+                width="stretch",
+                hide_index=True,
             )
+            st.caption(
+                "T/CT round win is the team's round result while the player was in the sampled "
+                "lineup. Opening, trading, assist and survival values currently use the complete "
+                "sample and are not side-specific."
+            )
+
+            st.warning(
+                "The positional part of the Role Fit is not scored yet: exact T routes and CT "
+                "positions are missing from the structured feeds, so the displayed score remains "
+                "provisional instead of treating unknown positions as a match."
+            )
+            source_links = st.columns(3)
+            with source_links[0]:
+                st.link_button(
+                    "Open NER0 Positions Database",
+                    (
+                        "https://public.tableau.com/app/profile/harry.richards4213/"
+                        "viz/PositionsDatabaseNER0cs/PositionsDatabaseNER0cs"
+                    ),
+                )
+            with source_links[1]:
+                st.link_button(
+                    "Open RDY Player Positions",
+                    "https://rdy.gg/en/cs2/stats?tab=player-positions",
+                )
+            with source_links[2]:
+                st.link_button(
+                    "Open RDY Roster Simulator",
+                    "https://rdy.gg/en/cs2/stats?tab=roster-simulator",
+                )
+
             st.markdown(
                 """
                 <div class="disclaimer">
-                  Source: NER0 / Harry Richards on Tableau Public. This is the live source
-                  visualization, not a copied or invented role score. Role labels and positions
-                  describe observed usage; they do not measure communication, calling,
-                  adaptability or guarantee that a transfer will work. If an alias does not
-                  resolve in the embedded filter, open the full database and search for the player.
+                  Source priority: structured NER0 positions, then RDY positions, then a
+                  clearly labelled statistical inference. RDY's current public page is used
+                  only for its published overall role. Missing CT/T positions are never guessed.
+                  Every value keeps its source and availability status.
                 </div>
                 """,
                 unsafe_allow_html=True,
