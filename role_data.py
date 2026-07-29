@@ -56,12 +56,7 @@ def _fetch_rdy_page() -> str:
     return payload.decode("utf-8", errors="replace")
 
 
-def load_rdy_role_profile(nickname: str) -> dict:
-    """Return a normalized, non-throwing role-source record for the app."""
-    try:
-        match = extract_rdy_overall_role(_fetch_rdy_page(), nickname)
-    except RuntimeError:
-        match = None
+def _role_profile(nickname: str, match: dict | None) -> dict:
     if match:
         return {
             "player": nickname,
@@ -81,3 +76,20 @@ def load_rdy_role_profile(nickname: str) -> dict:
         "status": "No structured role found",
         "position_coverage": 0,
     }
+
+
+def load_rdy_role_profiles(nicknames: tuple[str, ...]) -> list[dict]:
+    """Load the public RDY page once and normalize every requested player."""
+    try:
+        page = _fetch_rdy_page()
+    except RuntimeError:
+        page = ""
+    return [
+        _role_profile(nickname, extract_rdy_overall_role(page, nickname))
+        for nickname in nicknames
+    ]
+
+
+def load_rdy_role_profile(nickname: str) -> dict:
+    """Compatibility wrapper for a single player."""
+    return load_rdy_role_profiles((nickname,))[0]
