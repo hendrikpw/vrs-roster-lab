@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 from datetime import date, datetime, timedelta
+
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -16,7 +17,7 @@ from pro_data import (
     opponent_rank_summary,
     predict_veto,
 )
-from role_data import load_rdy_role_profile
+from role_data import load_rdy_role_profiles
 from vrs_data import (
     DATA_MODEL_VERSION,
     VRSDataError,
@@ -185,8 +186,8 @@ def get_player_profile(query: str, days: int, data_model_version: str):
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def get_rdy_role_profile(query: str):
-    return load_rdy_role_profile(query)
+def get_rdy_role_profiles(queries: tuple[str, ...]):
+    return load_rdy_role_profiles(queries)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1470,7 +1471,7 @@ with transfer_tab:
                     is unavailable. **Rating, ADR and K/D are deliberately excluded:** they
                     describe performance, not whether two players perform the same job.
                     Exact T-side routes and CT positions are not yet part of the calculation;
-                    use the NER0 scout below as the positional cross-check.
+                    use the source and coverage tables below as the positional cross-check.
                     """
                 )
 
@@ -1482,8 +1483,9 @@ with transfer_tab:
             )
 
             with st.spinner("Checking published role coverage…"):
-                current_role_source = get_rdy_role_profile(current_name)
-                candidate_role_source = get_rdy_role_profile(candidate_name)
+                current_role_source, candidate_role_source = get_rdy_role_profiles(
+                    (current_name, candidate_name)
+                )
 
             role_source_rows = pd.DataFrame(
                 [
