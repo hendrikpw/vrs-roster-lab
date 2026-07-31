@@ -145,7 +145,9 @@ st.markdown(
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_standings():
+def get_standings(data_model_version: str):
+    # The explicit version argument invalidates Streamlit's cache when the
+    # imported ranking parser or roster eligibility rules change.
     return load_hltv_live_standings()
 
 
@@ -308,7 +310,7 @@ def show_vrs_guide():
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
 using_fallback = False
 try:
-    snapshot, standings = get_standings()
+    snapshot, standings = get_standings(DATA_MODEL_VERSION)
 except VRSDataError:
     try:
         snapshot, standings = get_official_standings()
