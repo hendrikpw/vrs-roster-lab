@@ -384,15 +384,21 @@ with analysis_tab:
             """
             <div class="sim-panel">
               <h2>Simulate roster changes</h2>
-              <div class="panel-copy">Select players who leave the current five-player roster.</div>
+              <div class="panel-copy">Change the currently listed ranked roster.</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        if len(detail["roster"]) < 5:
+            st.info(
+                f"HLTV currently lists a {len(detail['roster'])}-player ranked core for "
+                f"{detail['team']}. You can fill the open position in Replacement players "
+                "without selecting anyone to leave."
+            )
         leaving = st.multiselect(
             "Players leaving",
             detail["roster"],
-            placeholder="Choose up to five players",
+            placeholder="Choose players to remove",
         )
         replacements_text = st.text_input(
             "Replacement players",
