@@ -24,8 +24,15 @@ class VRSDataError(RuntimeError):
     pass
 
 
-def _get_text(url: str, timeout: int = 20) -> str:
-    request = Request(url, headers={"User-Agent": USER_AGENT})
+def _get_text(
+    url: str,
+    timeout: int = 20,
+    headers: dict[str, str] | None = None,
+) -> str:
+    request_headers = {"User-Agent": USER_AGENT}
+    if headers:
+        request_headers.update(headers)
+    request = Request(url, headers=request_headers)
     try:
         with urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8")
@@ -74,6 +81,99 @@ def _iso_hltv_date(value: str) -> str:
         return value.strip()
 
 
+def _html_text(value: str) -> str:
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _absolute_hltv_url(value: str) -> str:
+    value = value.replace("&amp;", "&")
+    if value.startswith("/"):
+        return f"https://www.hltv.org{value}"
+    return value
+
+
+def _parse_hltv_standings_html(
+    markup: str,
+    snapshot_date: str,
+) -> list[dict[str, Any]]:
+    markers = list(
+        re.finditer(r'<div class="ranked-team standard-box">', markup)
+    )
+    rows: list[dict[str, Any]] = []
+    regional_counts: dict[str, int] = {}
+
+    for index, marker in enumerate(markers):
+        block_end = (
+            markers[index + 1].start()
+            if index + 1 < len(markers)
+            else len(markup)
+        )
+        block = markup[marker.start():block_end]
+        rank_match = re.search(
+            r'class="position wide-position">\s*#(\d+)\s*</span>',
+            block,
+        )
+        team_match = re.search(
+            r'<div class="teamLine[^"]*">.*?'
+            r'<span class="name">(.*?)</span>.*?'
+            r'<span class="points">\((\d+).*?points\)</span>.*?'
+            r'<span class="region[^"]*">(EU|AM|AS)</span>',
+            block,
+            re.DOTALL,
+        )
+        roster = [
+            _html_text(player)
+            for player in re.findall(
+                r'<div class="rankingNicknames">\s*<span>(.*?)</span>\s*</div>',
+                block,
+                re.DOTALL,
+            )
+        ]
+        detail_match = re.search(
+            r'<a[^>]+href="([^"]*/valve-ranking/teams/details/[^"]+)"'
+            r'[^>]*>\s*Ranking details\s*</a>',
+            block,
+            re.DOTALL,
+        )
+        team_url_match = re.search(
+            r'<a[^>]+href="([^"]*/team/[^"]+)"[^>]*>'
+            r'\s*HLTV Team profile\s*</a>',
+            block,
+            re.DOTALL,
+        )
+        if (
+            not rank_match
+            or not team_match
+            or len(roster) != 5
+            or not detail_match
+        ):
+            continue
+
+        region_code = team_match.group(3)
+        regional_counts[region_code] = regional_counts.get(region_code, 0) + 1
+        rows.append(
+            {
+                "rank": int(rank_match.group(1)),
+                "points": int(team_match.group(2)),
+                "team": _html_text(team_match.group(1)),
+                "roster": roster,
+                "snapshot_date": snapshot_date,
+                "region": REGION_NAMES[region_code],
+                "regional_rank": regional_counts[region_code],
+                "detail_path": "",
+                "detail_url": _absolute_hltv_url(detail_match.group(1)),
+                "team_url": (
+                    _absolute_hltv_url(team_url_match.group(1))
+                    if team_url_match
+                    else ""
+                ),
+                "source": "HLTV Live VRS (Beta)",
+            }
+        )
+    return rows
+
+
 def parse_hltv_standings(markdown: str) -> tuple[dict[str, str], list[dict[str, Any]]]:
     date_match = re.search(
         r"Valve global ranking on ([A-Za-z]+) (\d+)(?:st|nd|rd|th), (\d{4})",
@@ -84,6 +184,16 @@ def parse_hltv_standings(markdown: str) -> tuple[dict[str, str], list[dict[str, 
     snapshot_date = datetime.strptime(
         f"{date_match.group(1)} {date_match.group(2)} {date_match.group(3)}", "%B %d %Y"
     ).date().strftime("%Y_%m_%d")
+
+    if '<div class="ranked-team standard-box">' in markdown:
+        rows = _parse_hltv_standings_html(markdown, snapshot_date)
+        if not rows:
+            raise VRSDataError("HLTV's live VRS HTML did not contain any ranking rows.")
+        return {
+            "date": snapshot_date,
+            "path": HLTV_LIVE_URL,
+            "source": "HLTV Live VRS (Beta)",
+        }, rows
 
     markers = list(re.finditer(r"^#(\d+)!\[Image", markdown, re.MULTILINE))
     rows: list[dict[str, Any]] = []
@@ -326,7 +436,13 @@ def load_hltv_invite_ranking(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_hltv_live_standings() -> tuple[dict[str, str], list[dict[str, Any]]]:
-    return parse_hltv_standings(_get_text(f"{JINA_BASE}{HLTV_LIVE_URL}", timeout=30))
+    return parse_hltv_standings(
+        _get_text(
+            f"{JINA_BASE}{HLTV_LIVE_URL}",
+            timeout=30,
+            headers={"X-Return-Format": "html"},
+        )
+    )
 
 
 def _next_points(lines: list[str], label: str) -> float:
