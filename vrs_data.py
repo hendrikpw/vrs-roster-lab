@@ -145,7 +145,7 @@ def _parse_hltv_standings_html(
         if (
             not rank_match
             or not team_match
-            or len(roster) != 5
+            or not 3 <= len(roster) <= 5
             or not detail_match
         ):
             continue
@@ -220,7 +220,7 @@ def parse_hltv_standings(markdown: str) -> tuple[dict[str, str], list[dict[str, 
             roster.append(_clean_markdown_label(line))
             if len(roster) == 5:
                 break
-        if len(roster) != 5:
+        if not 3 <= len(roster) <= 5:
             continue
 
         region_code = team_match.group(3)
