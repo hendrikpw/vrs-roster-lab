@@ -83,6 +83,20 @@ HLTV_STANDINGS_HTML = """<h1>Valve global ranking on July 31st, 2026</h1>
   <a href="/team/6667/faze" class="moreLink">HLTV Team profile</a>
   <a href="/valve-ranking/teams/details/2026/july/31?lineup=1%2C2%2C3%2C4%2C5&amp;isFuture=false" class="details moreLink">Ranking details</a>
 </div>
+<div class="ranked-team standard-box">
+  <span class="position wide-position">#8</span>
+  <div class="teamLine sectionTeamPlayers">
+    <span class="name">MOUZ</span>
+    <span class="points">(1809<span class="gtSmartphone-only"> Valve</span> points)</span>
+    <span class="region region-eu">EU</span>
+  </div>
+  <div class="rankingNicknames"><span>torzsi</span></div>
+  <div class="rankingNicknames"><span>Spinx</span></div>
+  <div class="rankingNicknames"><span>xertioN</span></div>
+  <div class="rankingNicknames"><span>xelex</span></div>
+  <a href="/team/4494/mouz" class="moreLink">HLTV Team profile</a>
+  <a href="/valve-ranking/teams/details/2026/july/31?lineup=18072%2C18221%2C20312%2C24457&amp;isFuture=false" class="details moreLink">Ranking details</a>
+</div>
 """
 
 
@@ -253,6 +267,9 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(rows[0]["roster"], ["frozen", "Twistzz", "Neityu", "jcobbb", "JBOEN"])
         self.assertEqual(rows[0]["team_url"], "https://www.hltv.org/team/6667/faze")
         self.assertIn("&isFuture=false", rows[0]["detail_url"])
+        self.assertEqual(rows[1]["team"], "MOUZ")
+        self.assertEqual(rows[1]["roster"], ["torzsi", "Spinx", "xertioN", "xelex"])
+        self.assertEqual(rows[1]["points"], 1809)
 
     def test_hltv_detail_and_event_points(self):
         _, rows = parse_hltv_standings(HLTV_STANDINGS)
