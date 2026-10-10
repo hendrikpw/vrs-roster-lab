@@ -1,10 +1,12 @@
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from vrs_data import (
     DATA_MODEL_VERSION,
     build_vrs_timeline,
     fallback_data,
+    load_hltv_live_standings,
     parse_hltv_invite_ranking,
     parse_hltv_invite_ranking_html,
     parse_hltv_invites,
@@ -17,6 +19,7 @@ from vrs_data import (
     project_vrs,
     recency_weight,
     simulate_roster,
+    standings_only_detail,
 )
 
 
@@ -229,7 +232,25 @@ JBOEN
 
 class ParserTests(unittest.TestCase):
     def test_data_model_version_busts_streamlit_cache(self):
-        self.assertEqual(DATA_MODEL_VERSION, "invite-simulation-v4")
+        self.assertEqual(DATA_MODEL_VERSION, "direct-live-standings-v5")
+
+    @patch("vrs_data._get_text")
+    def test_live_standings_prefers_direct_hltv(self, get_text):
+        get_text.return_value = HLTV_STANDINGS_HTML
+        snapshot, rows = load_hltv_live_standings()
+        self.assertEqual(snapshot["date"], "2026_07_31")
+        self.assertEqual(rows[0]["roster"][0], "frozen")
+        self.assertEqual(get_text.call_args.args[0], "https://www.hltv.org/valve-ranking/teams")
+
+    def test_standings_summary_preserves_current_team_and_disables_simulation(self):
+        _, rows = parse_hltv_standings(HLTV_STANDINGS_HTML)
+        detail = standings_only_detail(rows[0])
+        self.assertEqual(detail["team"], "FaZe")
+        self.assertEqual(detail["roster"], ["frozen", "Twistzz", "Neityu", "jcobbb", "JBOEN"])
+        self.assertEqual(detail["final_score"], 1653)
+        result = simulate_roster(detail, ["JBOEN"], ["broky"])
+        self.assertFalse(result["simulation_complete"])
+        self.assertIsNone(result["indicative_score"])
 
     def test_fallback_matches_have_complete_display_metadata(self):
         _, _, detail = fallback_data()
