@@ -558,6 +558,13 @@ with analysis_tab:
         )
         match_rows = pd.DataFrame(simulation["rows"])
         if not match_rows.empty:
+            # Live HLTV detail and the bundled fallback do not always expose the
+            # same optional match metadata. Keep the table renderable when a
+            # source omits an event name instead of failing the whole app.
+            if "event" not in match_rows.columns:
+                match_rows["event"] = "Unlisted event"
+            else:
+                match_rows["event"] = match_rows["event"].fillna("Unlisted event")
             match_rows["Core"] = match_rows.apply(
                 lambda row: (
                     " · ".join(row["roster"])
@@ -1231,7 +1238,12 @@ with invite_tab:
                         row["points"] - cutoff_points if cutoff_points is not None else None
                         for row in track_rows
                     ],
-                    "Roster": [" · ".join(row["roster"]) for row in track_rows],
+                    "Roster": [
+                        " · ".join(row["roster"])
+                        if row["roster"]
+                        else "Not supplied by HLTV forecast"
+                        for row in track_rows
+                    ],
                 }
             )
             st.dataframe(
