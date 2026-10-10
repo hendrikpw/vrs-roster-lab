@@ -4,7 +4,9 @@ from datetime import date
 from vrs_data import (
     DATA_MODEL_VERSION,
     build_vrs_timeline,
+    fallback_data,
     parse_hltv_invite_ranking,
+    parse_hltv_invite_ranking_html,
     parse_hltv_invites,
     parse_hltv_standings,
     parse_hltv_match_roster,
@@ -227,7 +229,36 @@ JBOEN
 
 class ParserTests(unittest.TestCase):
     def test_data_model_version_busts_streamlit_cache(self):
-        self.assertEqual(DATA_MODEL_VERSION, "active-map-pool-v2")
+        self.assertEqual(DATA_MODEL_VERSION, "invite-simulation-v4")
+
+    def test_fallback_matches_have_complete_display_metadata(self):
+        _, _, detail = fallback_data()
+        self.assertEqual(detail["snapshot_date"], "2026_07_06")
+        self.assertTrue(all(match.get("event") for match in detail["matches"]))
+        self.assertIn("contributions", detail)
+
+    def test_hltv_invite_simulation_html_parser(self):
+        page = """
+        <div class="regional-ranking-header-text">Test Cup ranking on November 2nd, 2026</div>
+        <div class="region-header">Global</div>
+        <tr class="vrs-simulation-row above-cut" data-anchor="team-1">
+          <td class="position">1</td><td><span class="team-name">Alpha</span></td>
+        </tr>
+        <tr class="vrs-team-details hidden"><td>
+          <span>Projected points</span><span class="vrs-standing-value ">1,800</span>
+        </td></tr>
+        <tr class="vrs-simulation-row below-cut" data-anchor="team-2">
+          <td class="position">2</td><td><span class="team-name">Beta</span></td>
+        </tr>
+        <tr class="vrs-team-details hidden"><td>
+          <span>Projected points</span><span class="vrs-standing-value margin-below">1,650</span>
+        </td></tr>
+        """
+        result = parse_hltv_invite_ranking_html(page, {"name": "Test Cup"})
+        self.assertEqual(result["ranking_date"], "2026-11-02")
+        self.assertEqual([row["points"] for row in result["rows"]], [1800, 1650])
+        self.assertTrue(result["rows"][0]["qualified"])
+        self.assertFalse(result["rows"][1]["qualified"])
 
     def test_standings_parser(self):
         rows = parse_standings(STANDINGS, "live/2026/standings_global_2026_07_06.md")
