@@ -18,7 +18,7 @@ HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
 HLTV_INVITES_URL = "https://www.hltv.org/valve-ranking/invites"
 JINA_BASE = "https://r.jina.ai/"
 REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
-DATA_MODEL_VERSION = "invite-simulation-v4"
+DATA_MODEL_VERSION = "direct-live-standings-v5"
 
 
 class VRSDataError(RuntimeError):
@@ -551,13 +551,43 @@ def load_hltv_invite_ranking(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_hltv_live_standings() -> tuple[dict[str, str], list[dict[str, Any]]]:
-    return parse_hltv_standings(
-        _get_text(
-            f"{JINA_BASE}{HLTV_LIVE_URL}",
-            timeout=30,
-            headers={"X-Return-Format": "html"},
+    # HLTV's server-rendered page contains the full ranking and is currently
+    # more reliable than the reader proxy, which can receive a Cloudflare
+    # verification page. Keep the proxy as a fallback for transient direct
+    # access failures.
+    try:
+        return parse_hltv_standings(_get_text(HLTV_LIVE_URL, timeout=30))
+    except VRSDataError:
+        return parse_hltv_standings(
+            _get_text(
+                f"{JINA_BASE}{HLTV_LIVE_URL}",
+                timeout=30,
+                headers={"X-Return-Format": "html"},
+            )
         )
-    )
+
+
+def standings_only_detail(team_row: dict[str, Any]) -> dict[str, Any]:
+    """Preserve a current ranking row when its detailed breakdown is unavailable."""
+    points = float(team_row.get("points", 0.0))
+    return {
+        "team": team_row.get("team", "Unknown team"),
+        "roster": list(team_row.get("roster", [])),
+        "snapshot_date": team_row.get("snapshot_date", date.today().isoformat()),
+        "global_rank": int(team_row.get("rank", 0)),
+        "region": team_row.get("region", "Unknown region"),
+        "regional_rank": int(team_row.get("regional_rank", 0)),
+        "final_score": points,
+        "starting_score": points,
+        "h2h_total": 0.0,
+        "factors": {},
+        "matches": [],
+        "contributions": [],
+        "prizes": [],
+        "source": team_row.get("source", "Ranking summary"),
+        "detail_url": team_row.get("detail_url", ""),
+        "summary_only": True,
+    }
 
 
 def _next_points(lines: list[str], label: str) -> float:
@@ -1513,6 +1543,11 @@ def simulate_roster(
             },
         )
         group["matches"] += 1
+
+    if detail.get("summary_only"):
+        indicative_score = None
+        factor_ratio = None
+        simulation_complete = False
 
     return {
         "simulated_roster": simulated_roster,
