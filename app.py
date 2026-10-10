@@ -31,6 +31,7 @@ from vrs_data import (
     load_team_detail,
     project_vrs,
     simulate_roster,
+    standings_only_detail,
 )
 
 
@@ -308,16 +309,18 @@ def show_vrs_guide():
 
 
 fallback_snapshot, fallback_standings, fallback_detail = fallback_data()
-using_fallback = False
+using_bundled_demo = False
+using_official_snapshot = False
 try:
     snapshot, standings = get_standings(DATA_MODEL_VERSION)
 except VRSDataError:
     try:
         snapshot, standings = get_official_standings()
         snapshot["source"] = "Valve official snapshot"
+        using_official_snapshot = True
     except VRSDataError:
         snapshot, standings = fallback_snapshot, fallback_standings
-        using_fallback = True
+        using_bundled_demo = True
 
 
 st.markdown(
@@ -349,14 +352,32 @@ selected_name = st.selectbox(
 )
 selected = next(row for row in standings if row["team"] == selected_name)
 
-try:
-    detail = fallback_detail if using_fallback else resolve_team_detail(selected)
-except VRSDataError:
+detail_summary_only = False
+if using_bundled_demo:
     detail = fallback_detail
-    using_fallback = True
+else:
+    try:
+        detail = resolve_team_detail(selected)
+    except VRSDataError:
+        detail = standings_only_detail(selected)
+        detail_summary_only = True
 
-if using_fallback:
-    st.warning("Live HLTV and official Valve data are temporarily unavailable. Showing the bundled FaZe demo.")
+if using_bundled_demo:
+    st.warning(
+        "Live HLTV and official Valve data are temporarily unavailable. "
+        "Showing the bundled FaZe demo."
+    )
+elif using_official_snapshot:
+    st.info(
+        f"HLTV's live ranking is temporarily unavailable. Showing Valve's official "
+        f"snapshot from {snapshot['date'].replace('_', '-')} instead."
+    )
+if detail_summary_only:
+    st.info(
+        "The selected team's current ranking, points and roster are available. "
+        "Its detailed match contribution page is temporarily unavailable, so VRS "
+        "inheritance simulations remain disabled until that detail feed recovers."
+    )
 
 (
     analysis_tab,
