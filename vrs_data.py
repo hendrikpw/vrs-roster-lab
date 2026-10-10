@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html as html_lib
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -17,7 +18,7 @@ HLTV_LIVE_URL = "https://www.hltv.org/valve-ranking/teams"
 HLTV_INVITES_URL = "https://www.hltv.org/valve-ranking/invites"
 JINA_BASE = "https://r.jina.ai/"
 REGION_NAMES = {"EU": "Europe", "AM": "Americas", "AS": "Asia"}
-DATA_MODEL_VERSION = "ranked-cores-v3"
+DATA_MODEL_VERSION = "invite-simulation-v4"
 
 
 class VRSDataError(RuntimeError):
@@ -424,12 +425,126 @@ def parse_hltv_invite_ranking(
     }
 
 
+def _plain_html(value: str) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        html_lib.unescape(re.sub(r"<[^>]+>", " ", value)),
+    ).strip()
+
+
+def parse_hltv_invite_ranking_html(
+    page_html: str, event: dict[str, Any]
+) -> dict[str, Any]:
+    """Parse HLTV's current invite simulation table from server-rendered HTML."""
+    header = re.search(
+        r'<div class="regional-ranking-header-text">(.*?)</div>',
+        page_html,
+        re.DOTALL,
+    )
+    header_text = _plain_html(header.group(1)) if header else ""
+    header_match = re.search(
+        r"^(.+?) ranking on ([A-Za-z]+) (\d+)(?:st|nd|rd|th), (\d{4})$",
+        header_text,
+    )
+    if not header_match:
+        raise VRSDataError("HLTV's invite prediction date could not be read.")
+    ranking_date = datetime.strptime(
+        f"{header_match.group(2)} {header_match.group(3)} {header_match.group(4)}",
+        "%B %d %Y",
+    ).date()
+
+    headings = list(
+        re.finditer(
+            r'<div class="region-header">(.*?)</div>',
+            page_html,
+            re.DOTALL,
+        )
+    )
+    markers = list(
+        re.finditer(
+            r'<tr class="vrs-simulation-row\s+([^"]*)"[^>]*>(.*?)</tr>',
+            page_html,
+            re.DOTALL,
+        )
+    )
+    rows: list[dict[str, Any]] = []
+    track_counts: dict[str, int] = {}
+    for index, marker in enumerate(markers):
+        row_html = marker.group(2)
+        block_end = markers[index + 1].start() if index + 1 < len(markers) else len(page_html)
+        block = page_html[marker.start():block_end]
+        rank_match = re.search(r'<td class="position">\s*(\d+)\s*</td>', row_html)
+        team_match = re.search(
+            r'<span class="team-name">(.*?)</span>', row_html, re.DOTALL
+        )
+        projected_match = re.search(
+            r"Projected points.*?"
+            r'<span class="vrs-standing-value[^"]*">\s*([\d,]+)\s*</span>',
+            block,
+            re.DOTALL,
+        )
+        if not rank_match or not team_match or not projected_match:
+            continue
+        previous_headings = [heading for heading in headings if heading.start() < marker.start()]
+        track = _plain_html(previous_headings[-1].group(1)) if previous_headings else "Global"
+        if track not in {"Global", "Europe", "Americas", "America", "Asia"}:
+            track = "Global"
+        if track == "America":
+            track = "Americas"
+        track_counts[track] = track_counts.get(track, 0) + 1
+        qualified = "above-cut" in marker.group(1).split()
+        rows.append(
+            {
+                "rank": int(rank_match.group(1)),
+                "team": _plain_html(team_match.group(1)),
+                "points": int(projected_match.group(1).replace(",", "")),
+                "region": track,
+                "regional_rank": track_counts[track],
+                "roster": [],
+                "track": track,
+                "qualified": qualified,
+                "status": "Invited" if qualified else "Outside",
+            }
+        )
+    if not rows:
+        raise VRSDataError("HLTV's invite simulation did not contain ranking rows.")
+
+    tracks: dict[str, dict[str, Any]] = {}
+    for track in dict.fromkeys(row["track"] for row in rows):
+        track_rows = [row for row in rows if row["track"] == track]
+        qualified_rows = [row for row in track_rows if row["qualified"]]
+        outside_rows = [row for row in track_rows if not row["qualified"]]
+        tracks[track] = {
+            "rows": track_rows,
+            "cutoff": qualified_rows[-1] if qualified_rows else None,
+            "first_out": outside_rows[0] if outside_rows else None,
+        }
+    primary_track = "Global" if "Global" in tracks else next(iter(tracks))
+    return {
+        **event,
+        "full_name": header_match.group(1).strip(),
+        "ranking_date": ranking_date.isoformat(),
+        "rows": rows,
+        "tracks": tracks,
+        "cutoff": tracks[primary_track]["cutoff"],
+        "first_out": tracks[primary_track]["first_out"],
+        "source": "HLTV VRS invite simulation",
+    }
+
+
 def load_hltv_invite_ranking(event: dict[str, Any]) -> dict[str, Any]:
     event_url = event.get("event_url", "")
     if not re.fullmatch(
         r"https://www\.hltv\.org/valve-ranking/teams/event/\d+", event_url
     ):
         raise VRSDataError("Unexpected HLTV invite event URL.")
+    try:
+        page_html = _get_text(event_url, timeout=30)
+        if "vrs-simulation-row" in page_html:
+            return parse_hltv_invite_ranking_html(page_html, event)
+    except VRSDataError:
+        pass
     return parse_hltv_invite_ranking(
         _get_text(f"{JINA_BASE}{event_url}", timeout=30), event
     )
@@ -1438,6 +1553,7 @@ def fallback_data() -> tuple[dict[str, str], list[dict[str, Any]], dict[str, Any
     detail = {
         "team": "FaZe",
         "roster": standings[0]["roster"],
+        "snapshot_date": snapshot["date"],
         "global_rank": 23,
         "region": "Europe",
         "regional_rank": 16,
@@ -1456,6 +1572,7 @@ def fallback_data() -> tuple[dict[str, str], list[dict[str, Any]], dict[str, Any
                 "match_id": 681,
                 "date": "2026-05-30",
                 "opponent": "Ninjas in Pyjamas",
+                "event": "Bundled demo",
                 "result": "L",
                 "age_weight": 0.953,
                 "event_weight": 0.0,
@@ -1470,6 +1587,7 @@ def fallback_data() -> tuple[dict[str, str], list[dict[str, Any]], dict[str, Any
                 "match_id": 2438,
                 "date": "2026-04-06",
                 "opponent": "Inner Circle",
+                "event": "Bundled demo",
                 "result": "L",
                 "age_weight": 0.593,
                 "event_weight": 0.0,
@@ -1480,6 +1598,9 @@ def fallback_data() -> tuple[dict[str, str], list[dict[str, Any]], dict[str, Any
                 "roster": ["broky", "frozen", "jcobbb", "karrigan", "Twistzz"],
             },
         ],
+        "contributions": [],
         "prizes": [],
+        "source": "Bundled offline demo",
+        "detail_url": "",
     }
     return snapshot, standings, detail
